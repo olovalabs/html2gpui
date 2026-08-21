@@ -1,79 +1,174 @@
-# app
+# html2gpui ⚡
 
-A native desktop GUI app built with [gpui](https://github.com/zed-industries/zed) (Zed's UI framework). The UI is authored as plain HTML files in `root/*.html` and compiled to gpui by the custom `html2gpui` compiler crate.
+> Compile declarative HTML, CSS, and reactive JS components directly into high-performance, GPU-accelerated native desktop applications powered by [Zed's GPUI](https://github.com/zed-industries/zed).
 
-## Requirements
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-1.80%2B-orange.svg)](https://www.rust-lang.org/)
+[![GPUI](https://img.shields.io/badge/Engine-Zed%20GPUI%200.2-purple.svg)](https://github.com/zed-industries/zed)
 
-- Rust (rustup) — `rustc`/`cargo` must be at `%USERPROFILE%\.cargo\bin`
+---
+
+## ✨ Features
+
+- ⚡ **Sub-15ms In-Memory HMR**: Edit any `.html` or `.css` file and watch the desktop GUI update instantly in real time without restarting the Rust app.
+- 🧩 **Component Architecture**: Modular component imports with `@use Component from "./path"`, custom alias imports, and props passing (`<Card title="Hello" count={count} />`).
+- 💡 **Reactive State Engine**: Write JS-like scripts with `let`, `function`, `onclick={fn}`, and reactive text interpolation (`{var}` and `{{var}}`).
+- 🎨 **Shadcn UI & Global CSS**: Centralized design system in `root/global.css` automatically inherited by all components with local `<style>` overrides.
+- 🖼️ **Hardware-Accelerated SVGs**: Drop raw `<svg src="icons/name.svg" />` files directly into templates with custom dimensions and color tinting.
+- 📜 **Bounded Viewport Scrolling**: Smart browser-grade scroll engine with dynamic viewport measurement and proportional scrollbar thumb indicators.
+- 📁 **Universal Folder Structure**: Create components and stylesheets at any directory depth inside `root/`.
+
+---
+
+## 🚀 Quick Start
+
+### Prerequisites
+- [Rust](https://rustup.rs/) (rustup toolchain)
 - Windows
 
-## Commands
+### Running with HMR (Development)
 
-All commands go through `run.cmd`:
+Using Git Bash:
+```bash
+export PATH="$HOME/.cargo/bin:$PATH"
+./run.cmd dev
+```
 
-| Command | What it does |
-|---|---|
-| `run.cmd dev` | Compile `root/*.html` and launch the GUI with **HMR hot-reload** (debug build). Edit any HTML file, save, and the window updates in real time. No restart or Rust recompile needed. |
-| `run.cmd build` | Optimized release build → `target\release\app.exe` |
-| `run.cmd preview` | Launch the release exe (must run `run.cmd build` first) |
-| `cargo check -p app` | Type-check the workspace |
-| `cargo test -p html2gpui` | Run compiler tests |
+Or directly with Cargo:
+```bash
+cargo run -p app
+```
 
-### Bash (Git Bash) equivalents
+### Optimized Release Build
 
 ```bash
-export PATH="$HOME/.cargo/bin:$PATH"   # once per shell
-
-./run.cmd dev                          # or:
-cargo run -p app                       # dev with HMR
-cargo build --release -p app           # release build
-./target/release/app.exe               # launch release
+./run.cmd build
+./target/release/app.exe
 ```
 
-## Project layout
+---
+
+## 📂 Project Structure
 
 ```
-app/        GUI app (gpui) — debug mode includes the HMR watcher
-compiler/   html2gpui — compiles root/*.html into gpui code
-root/       Your UI source: app.html is the entry component
-run.cmd     dev / build / preview wrapper
+root/                          # UI Source (HTML, CSS, Assets)
+├── app.html                   # Root entry point & layout router
+├── global.css                 # Global design system & utility classes
+├── navbar.html                # Top navigation header component
+├── sidebar.html               # Left sidebar navigation component
+├── dashboard.html             # Main dashboard analytics view
+├── props_test.html            # Interactive props passing test lab
+├── about.html                 # State management showcase view
+├── info.html                  # Architecture specifications view
+├── settings.html              # Configuration & settings view
+├── components/                # Reusable UI components
+│   ├── footer.html
+│   ├── stat_box.html
+│   └── user_card.html
+└── icons/                     # Vector SVG icons
+    ├── dashboard.svg
+    ├── layers.svg
+    ├── terminal.svg
+    └── settings.svg
+
+compiler/                      # html2gpui crate (AST parser & interpreter)
+├── src/
+│   ├── ast.rs                 # Script language AST nodes
+│   ├── codegen.rs             # Static Rust code serializer
+│   ├── css.rs                 # CSS parser & GPUI style mapper
+│   ├── eval.rs                # Scoped expression evaluator & executor
+│   ├── html.rs                # HTML DOM parser & component tag rewriter
+│   ├── loader.rs              # Recursive file scanner & module resolver
+│   ├── parser.rs              # Recursive descent script parser
+│   ├── script.rs              # Public runtime script facade
+│   ├── template.rs            # Single & double brace template parser
+│   ├── tokenizer.rs           # Lexical tokenizer
+│   ├── types.rs               # Core IR types (IrDoc, IrElem, IrChild)
+│   ├── utils.rs               # String & casing helpers
+│   └── lib.rs                 # Main module wiring & unit tests
+
+app/                           # Native GPUI application shell
+└── src/
+    └── main.rs                # GPU surface mounting & live HMR watcher
 ```
 
-## Writing UI
+---
 
-Each `.html` file in `root/` becomes one component (filename → component name). `app.html` is the entry point.
+## 📝 Writing Components
+
+### 1. Component with Reactive State
+```html
+<script>
+  let count = 0;
+
+  function increment() {
+    count++;
+  }
+
+  function decrement() {
+    if (count > 0) {
+      count--;
+    }
+  }
+</script>
+
+<div class="counter-card">
+  <h3>Count: {count}</h3>
+  <div class="row">
+    <button class="btn" onclick={decrement}>-</button>
+    <button class="btn btn-primary" onclick={increment}>+</button>
+  </div>
+</div>
+```
+
+### 2. Passing Props to Reusable Components
+```html
+<!-- Parent View -->
+@use UserCard from "./components/user_card.html"
+
+<script>
+  let stars = 42;
+</script>
+
+<div>
+  <UserCard name="Nazmul Hossain" role="Lead Architect" stars={stars} />
+  <button class="btn" onclick="stars++">+ Star</button>
+</div>
+```
 
 ```html
-@use Info from "./info.html"
-
-<html>
-    <h1>Hello world</h1>
-    <Info />
-</html>
-
-<style>
-h1 {
-    color: yellow;
-    background-color: green;
-}
-</style>
+<!-- root/components/user_card.html -->
+<div class="card">
+  <h4>{name}</h4>
+  <p>{role}</p>
+  <span>★ {stars} Stars</span>
+</div>
 ```
 
-- `@use Name from "./file.html"` imports another component
-- `<Name />` places it in the layout
-- Style with `<style>` blocks (tag selectors like `h1 {}` and class selectors like `.card {}`) or inline `style="..."` attributes
+### 3. Conditional Rendering (Show / Hide)
+```html
+<script>
+  let is_open = false;
+</script>
 
-## HMR (hot-reload)
+<button class="btn" onclick="is_open = !is_open">Toggle</button>
 
-`run.cmd dev` runs the app in debug mode, which:
+<div if={is_open} class="drawer">
+  <p>Conditionally mounted when is_open is true!</p>
+</div>
+```
 
-1. Watches all `root/*.html` files (~3 checks/sec)
-2. On save, recompiles them in-memory and redraws the window instantly
-3. If your HTML has an error (bad `@use`, syntax error, etc.), the window shows a red "Compile error" screen with the message — fix the file and it recovers automatically
+---
 
-Only the HTML is hot-reloaded. If you edit Rust code (`app/src`, `compiler/src`), stop the app (`Ctrl+C`) and run `run.cmd dev` again.
+## 🧪 Testing the Compiler
 
-## Release vs debug
+Run compiler unit tests:
+```bash
+cargo test -p html2gpui
+```
 
-- **Debug (`run.cmd dev`)**: HMR watcher active, slower rendering
-- **Release (`run.cmd build`)**: HTML is compiled into the binary at build time, no watcher
+---
+
+## 📜 License
+
+MIT © [Olova Labs](https://github.com/olovalabs)
