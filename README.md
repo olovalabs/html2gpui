@@ -5,12 +5,14 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.80%2B-orange.svg)](https://www.rust-lang.org/)
 [![GPUI](https://img.shields.io/badge/Engine-Zed%20GPUI%200.2-purple.svg)](https://github.com/zed-industries/zed)
+[![Cross-Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20Windows-green.svg)](https://github.com/olovalabs/html2gpui)
 
 ---
 
 ## ✨ Features
 
 - ⚡ **Sub-15ms In-Memory HMR**: Edit any `.html` or `.css` file and watch the desktop GUI update instantly in real time without restarting the Rust app.
+- 🌐 **100% Cross-Platform**: Runs natively on **macOS**, **Linux**, and **Windows** with hardware-accelerated GPU rendering.
 - 🧩 **Component Architecture**: Modular component imports with `@use Component from "./path"`, custom alias imports, and props passing (`<Card title="Hello" count={count} />`).
 - 💡 **Reactive State Engine**: Write JS-like scripts with `let`, `function`, `onclick={fn}`, and reactive text interpolation (`{var}` and `{{var}}`).
 - 🎨 **Shadcn UI & Global CSS**: Centralized design system in `root/global.css` automatically inherited by all components with local `<style>` overrides.
@@ -23,24 +25,37 @@
 ## 🚀 Quick Start
 
 ### Prerequisites
-- [Rust](https://rustup.rs/) (rustup toolchain)
-- Windows
+- [Rust](https://rustup.rs/) (rustup toolchain `1.80+`)
 
-### Running with HMR (Development)
+### Running Development Server (with Live HMR)
 
-Using Git Bash:
+#### 🍏 macOS & 🐧 Linux
 ```bash
-export PATH="$HOME/.cargo/bin:$PATH"
+chmod +x run.sh
+./run.sh dev
+```
+
+#### 🪟 Windows (Git Bash or CMD)
+```bash
 ./run.cmd dev
 ```
 
-Or directly with Cargo:
+#### 💻 Universal (Any OS via Cargo)
 ```bash
 cargo run -p app
 ```
 
-### Optimized Release Build
+---
 
+### Building for Production (Optimized Release)
+
+#### 🍏 macOS & 🐧 Linux
+```bash
+./run.sh build
+./target/release/app
+```
+
+#### 🪟 Windows
 ```bash
 ./run.cmd build
 ./target/release/app.exe
@@ -162,7 +177,7 @@ app/                           # Native GPUI application shell
 
 ## 🧪 Testing the Compiler
 
-Run compiler unit tests:
+Run compiler unit tests across all platforms:
 ```bash
 cargo test -p html2gpui
 ```
