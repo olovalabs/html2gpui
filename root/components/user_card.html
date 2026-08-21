@@ -1,0 +1,78 @@
+<div class="user-card-box">
+  <div class="card-top-row">
+    <div class="user-badge-avatar">
+      <svg src="icons/user.svg" width="16px" height="16px" color="#fafafa" />
+    </div>
+    <div class="user-text-meta">
+      <p class="user-title-text">{name}</p>
+      <p class="user-role-text">{role}</p>
+    </div>
+  </div>
+  <div class="card-bottom-row">
+    <span class="star-pill">★ Stars: {stars}</span>
+    <span class="status-pill">Active</span>
+  </div>
+</div>
+
+<style>
+.user-card-box {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background-color: #18181b;
+  border: 1px #27272a;
+  padding: 14px;
+  border-radius: 8px;
+  width: 100%;
+}
+.card-top-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+}
+.user-badge-avatar {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background-color: #27272a;
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+}
+.user-text-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.user-title-text {
+  font-size: 13px;
+  font-weight: bold;
+  color: #fafafa;
+}
+.user-role-text {
+  font-size: 11px;
+  color: #a1a1aa;
+}
+.card-bottom-row {
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
+  align-items: center;
+}
+.star-pill {
+  background-color: #27272a;
+  color: #facc15;
+  font-size: 11px;
+  font-weight: bold;
+  padding: 3px 8px;
+  border-radius: 4px;
+}
+.status-pill {
+  background-color: #14532d;
+  color: #4ade80;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+</style>

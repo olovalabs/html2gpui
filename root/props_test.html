@@ -1,0 +1,124 @@
+@use UserCard from "./components/user_card.html"
+@use StatBox from "./components/stat_box.html"
+
+<script>
+  let live_stars = 42;
+  let developer_name = "Nazmul Hossain";
+  let current_role = "Lead Architect";
+  let revenue_amount = 89200;
+  let test_revenue = "$89,200";
+
+  function addStar() {
+    live_stars++;
+  }
+
+  function switchUser() {
+    if (developer_name == "Nazmul Hossain") {
+      developer_name = "Sarah Connor";
+      current_role = "Security Lead";
+    } else {
+      developer_name = "Nazmul Hossain";
+      current_role = "Lead Architect";
+    }
+  }
+
+  function boostRevenue() {
+    revenue_amount = revenue_amount + 12500;
+    test_revenue = "$" + revenue_amount;
+  }
+</script>
+
+<div class="props-lab">
+  <div class="lab-header">
+    <h2>Props Passing Test Lab</h2>
+    <p class="lab-sub">Passing static literals &amp; reactive dynamic parent state into reusable child components.</p>
+  </div>
+
+  <!-- Controller Bar -->
+  <div class="control-card">
+    <div class="ctrl-left">
+      <p class="ctrl-title">Parent State Controller</p>
+      <p class="ctrl-sub">Click any button below: parent state updates and child components instantly re-render with updated props.</p>
+    </div>
+    <div class="ctrl-actions">
+      <button class="btn btn-primary" onclick={addStar}>+ Add Star ({live_stars})</button>
+      <button class="btn btn-secondary" onclick={switchUser}>Switch User Name</button>
+      <button class="btn btn-secondary" onclick={boostRevenue}>+ Boost Revenue ({test_revenue})</button>
+    </div>
+  </div>
+
+  <!-- Reusable StatBox Components Receiving Props -->
+  <div class="panel">
+    <h3>1. Metric Cards (Passed via Props)</h3>
+    <div class="row">
+      <StatBox title="Total Revenue" value={test_revenue} trend="+32.4% this week" />
+      <StatBox title="Github Stars" value={live_stars} trend="+12 today" />
+      <StatBox title="Target Platform" value="Windows / GPU" trend="Zed GPUI 0.2" />
+    </div>
+  </div>
+
+  <!-- Reusable UserCard Components Receiving Props -->
+  <div class="panel">
+    <h3>2. User Cards (Static &amp; Dynamic Props)</h3>
+    <div class="row">
+      <!-- Dynamic Prop from Parent State -->
+      <UserCard name={developer_name} role={current_role} stars={live_stars} />
+
+      <!-- Static String Literal Props -->
+      <UserCard name="Alex Mercer" role="Compiler Engineer" stars=88 />
+      <UserCard name="Elena Rostova" role="UI / UX Designer" stars=150 />
+    </div>
+  </div>
+</div>
+
+<style>
+.props-lab {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+}
+.lab-header {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.lab-sub {
+  color: #71717a;
+  font-size: 13px;
+}
+.control-card {
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
+  align-items: center;
+  background-color: #18181b;
+  border: 1px #27272a;
+  padding: 14px 18px;
+  border-radius: 8px;
+}
+.ctrl-left {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ctrl-title {
+  font-size: 13px;
+  font-weight: bold;
+  color: #fafafa;
+}
+.ctrl-sub {
+  font-size: 11px;
+  color: #71717a;
+}
+.ctrl-actions {
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+}
+.row {
+  display: flex;
+  flex-direction: row;
+  gap: 12px;
+}
+</style>

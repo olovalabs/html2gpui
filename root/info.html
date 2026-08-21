@@ -1,0 +1,122 @@
+<div class="info-box">
+  <div class="head-box">
+    <h2>Architecture & Pipeline</h2>
+    <p class="head-sub">Technical specifications and runtime internals.</p>
+  </div>
+
+  <div class="info-card">
+    <div class="card-head">
+      <h3>Technology Stack</h3>
+    </div>
+    <div class="stack-list">
+      <div class="spec-row">
+        <span class="spec-label">GUI Framework</span>
+        <span class="spec-tech">Zed GPUI (GPU-accelerated)</span>
+      </div>
+      <div class="spec-row">
+        <span class="spec-label">Compiler Engine</span>
+        <span class="spec-tech">html2gpui AST Parser &amp; Bytecode</span>
+      </div>
+      <div class="spec-row">
+        <span class="spec-label">HMR Engine</span>
+        <span class="spec-tech">Sub-15ms In-Memory Tree Diffing</span>
+      </div>
+      <div class="spec-row">
+        <span class="spec-label">Vector Pipeline</span>
+        <span class="spec-tech">Native Resvg Vector Engine</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="info-card">
+    <div class="card-head">
+      <h3>Compiler Capabilities</h3>
+    </div>
+    <div class="feature-grid">
+      <div class="feat-badge">✓ @use Component Imports</div>
+      <div class="feat-badge">✓ Dual {var} and {{var}} Interpolation</div>
+      <div class="feat-badge">✓ onclick={fn} &amp; onclick="fn()"</div>
+      <div class="feat-badge">✓ if={condition} Conditional Mounting</div>
+      <div class="feat-badge">✓ &lt;svg src="..."&gt; Vector Support</div>
+      <div class="feat-badge">✓ Scoped Lexical State &amp; AST Functions</div>
+    </div>
+  </div>
+</div>
+
+<style>
+.info-box {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 100%;
+}
+
+.head-box {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.head-sub {
+  color: #71717a;
+  font-size: 13px;
+}
+
+.info-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background-color: #09090b;
+  border: 1px #27272a;
+  padding: 16px;
+  border-radius: 8px;
+}
+
+.card-head {
+  padding-bottom: 8px;
+  border-bottom: 1px #27272a;
+}
+
+.stack-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.spec-row {
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
+  align-items: center;
+  background-color: #18181b;
+  padding: 8px 12px;
+  border-radius: 6px;
+}
+
+.spec-label {
+  font-size: 12px;
+  color: #a1a1aa;
+}
+
+.spec-tech {
+  font-size: 12px;
+  font-weight: bold;
+  color: #fafafa;
+}
+
+.feature-grid {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.feat-badge {
+  background-color: #18181b;
+  border: 1px #27272a;
+  color: #4ade80;
+  font-size: 11px;
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+</style>

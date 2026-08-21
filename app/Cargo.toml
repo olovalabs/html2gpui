@@ -1,0 +1,11 @@
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gpui = "0.2"
+html2gpui = { path = "../compiler" }
+
+[build-dependencies]
+html2gpui = { path = "../compiler" }
