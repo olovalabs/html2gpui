@@ -1,0 +1,218 @@
+/* Scoped to dashboard.html via `import "./dashboard.css";` —
+   these rules never leak into other components. */
+
+.dashboard {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+}
+
+.dash-header {
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.dash-titles {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.dash-subtitle {
+  color: #71717a;
+  font-size: 13px;
+}
+
+.dash-actions {
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+  align-items: center;
+}
+
+.kpi-grid {
+  display: flex;
+  flex-direction: row;
+  gap: 12px;
+}
+
+.kpi-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background-color: #09090b;
+  border: 1px #27272a;
+  padding: 14px 16px;
+  border-radius: 8px;
+  width: 100%;
+}
+
+.kpi-top {
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.kpi-label {
+  font-size: 12px;
+  color: #a1a1aa;
+}
+
+.kpi-value {
+  font-size: 20px;
+  font-weight: bold;
+  color: #fafafa;
+}
+
+.kpi-trend {
+  font-size: 11px;
+  color: #22c55e;
+}
+
+.kpi-sub {
+  font-size: 11px;
+  color: #71717a;
+}
+
+.content-split {
+  display: flex;
+  flex-direction: row;
+  gap: 14px;
+}
+
+.feed-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background-color: #09090b;
+  border: 1px #27272a;
+  padding: 16px;
+  border-radius: 8px;
+  width: 65%;
+}
+
+.specs-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background-color: #09090b;
+  border: 1px #27272a;
+  padding: 16px;
+  border-radius: 8px;
+  width: 35%;
+}
+
+.card-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-bottom: 8px;
+  border-bottom: 1px #27272a;
+}
+
+.card-sub {
+  font-size: 12px;
+  color: #71717a;
+}
+
+.event-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.event-row {
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
+  align-items: center;
+  background-color: #18181b;
+  padding: 8px 12px;
+  border-radius: 6px;
+}
+
+.event-left {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+}
+
+.event-title {
+  font-size: 12px;
+  font-weight: bold;
+  color: #f4f4f5;
+}
+
+.event-meta {
+  font-size: 11px;
+  color: #71717a;
+}
+
+.badge-success {
+  background-color: #14532d;
+  color: #4ade80;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.badge-info {
+  background-color: #1e3a8a;
+  color: #60a5fa;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.spec-items {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.spec-row {
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
+  padding: 6px 8px;
+  background-color: #18181b;
+  border-radius: 6px;
+}
+
+.spec-key {
+  font-size: 12px;
+  color: #a1a1aa;
+}
+
+.spec-val {
+  font-size: 12px;
+  font-weight: bold;
+  color: #f4f4f5;
+}
+
+.btn {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: bold;
+}
+
+.btn-primary {
+  background-color: #fafafa;
+  color: #09090b;
+}
+
+.btn-secondary {
+  background-color: #18181b;
+  border: 1px #27272a;
+  color: #e4e4e7;
+}

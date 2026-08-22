@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 use crate::css::parse_css;
-use crate::html::{compile_component_ir, rewrite_component_tags, strip_uses};
+use crate::html::{compile_component_ir, rewrite_component_tags, strip_script_imports};
 use crate::script::parse_script;
 use crate::types::{Ctx, IrDoc, Result};
 use crate::utils::{pascal_case, snake_case};
@@ -42,12 +42,11 @@ pub fn compile_sources(files: &[(String, String)]) -> Result<(IrDoc, Vec<String>
         return Err("no .html or .css files provided".into());
     }
 
-    let mut global_css = String::new();
     let mut html_files = Vec::new();
+    let mut css_files: BTreeMap<String, String> = BTreeMap::new();
     for (name, raw) in files {
         if name.ends_with(".css") {
-            global_css.push_str(raw);
-            global_css.push('\n');
+            css_files.insert(name.clone(), raw.clone());
         } else {
             let stem = name.strip_suffix(".html").unwrap_or(name);
             html_files.push((stem.to_string(), raw.clone()));
@@ -59,8 +58,9 @@ pub fn compile_sources(files: &[(String, String)]) -> Result<(IrDoc, Vec<String>
     }
 
     let mut warnings = Vec::new();
-    let (global_tags, global_classes) = parse_css(&global_css, &mut warnings);
 
+    // First pass: pull import lines out of every component so we know which
+    // css files are explicitly imported before deciding what stays global.
     struct Source {
         rel_path: String,
         file_stem: String,
@@ -68,11 +68,29 @@ pub fn compile_sources(files: &[(String, String)]) -> Result<(IrDoc, Vec<String>
         pascal_name: String,
         src: String,
         uses: Vec<(String, String)>,
+        css_paths: Vec<String>,
+        local_tags: BTreeMap<String, Vec<(String, String)>>,
+        local_classes: BTreeMap<String, Vec<(String, String)>>,
     }
     let mut sources: Vec<Source> = Vec::new();
     for (rel_path, raw) in &html_files {
-        let (src, uses) = strip_uses(raw);
+        let (src, imports) = strip_script_imports(raw, &mut warnings);
         let src = rewrite_component_tags(&src);
+
+        let mut local_tags = BTreeMap::new();
+        let mut local_classes = BTreeMap::new();
+        for css_path in &imports.css {
+            let clean = normalize_path(css_path);
+            let Some(css_src) = css_files.get(&clean) else {
+                return Err(format!(
+                    "import \"{css_path}\": no matching css file found in root/"
+                ));
+            };
+            let (tags, classes) = parse_css(css_src, &mut warnings);
+            merge_decls(&mut local_tags, tags);
+            merge_decls(&mut local_classes, classes);
+        }
+
         let file_stem = rel_path.split('/').last().unwrap_or(rel_path).to_string();
         let comp_id = snake_case(&file_stem);
         let pascal_name = pascal_case(&file_stem);
@@ -82,9 +100,26 @@ pub fn compile_sources(files: &[(String, String)]) -> Result<(IrDoc, Vec<String>
             comp_id,
             pascal_name,
             src,
-            uses,
+            uses: imports.comps,
+            css_paths: imports.css.iter().map(|p| normalize_path(p)).collect(),
+            local_tags,
+            local_classes,
         });
     }
+
+    // CSS that is explicitly imported is scoped to its importer; everything
+    // else stays global.
+    let imported_css: Vec<String> = sources
+        .iter()
+        .flat_map(|s| s.css_paths.iter().cloned())
+        .collect();
+    let global_css: String = css_files
+        .iter()
+        .filter(|(name, _)| !imported_css.contains(name))
+        .map(|(_, src)| src.clone() + "\n")
+        .collect();
+    let (global_tags, global_classes) = parse_css(&global_css, &mut warnings);
+
     let mut comps = BTreeMap::new();
     let mut script_src = String::new();
     for s in &sources {
@@ -113,10 +148,12 @@ pub fn compile_sources(files: &[(String, String)]) -> Result<(IrDoc, Vec<String>
                 local_ctx.comps.insert(alias.clone(), matched.comp_id.clone());
             } else {
                 return Err(format!(
-                    "@use {alias} from \"{path_str}\": no matching component file found in root/"
+                    "import {alias} from \"{path_str}\": no matching component file found in root/"
                 ));
             }
         }
+        local_ctx.tag_styles.extend(s.local_tags.clone());
+        local_ctx.class_styles.extend(s.local_classes.clone());
         let (elem, script) = compile_component_ir(&s.src, &local_ctx, &mut warnings)
             .map_err(|e| format!("{}.html: {e}", s.rel_path))?;
         script_src.push_str(&script);
@@ -132,4 +169,21 @@ pub fn compile_sources(files: &[(String, String)]) -> Result<(IrDoc, Vec<String>
         },
         warnings,
     ))
+}
+
+fn normalize_path(p: &str) -> String {
+    p.trim_matches('"')
+        .trim_matches('\'')
+        .trim_start_matches("./")
+        .trim_start_matches('/')
+        .replace('\\', "/")
+}
+
+fn merge_decls(
+    into: &mut BTreeMap<String, Vec<(String, String)>>,
+    from: BTreeMap<String, Vec<(String, String)>>,
+) {
+    for (k, v) in from {
+        into.entry(k).or_insert(v);
+    }
 }

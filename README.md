@@ -20,7 +20,8 @@
 
 - ⚡ **Sub-15ms In-Memory HMR**: Edit any `.html` or `.css` file and watch the desktop GUI update instantly in real time without restarting the Rust app.
 - 🌐 **100% Cross-Platform**: Runs natively on **macOS**, **Linux**, and **Windows** with hardware-accelerated GPU rendering.
-- 🧩 **Component Architecture**: Modular component imports with `@use Component from "./path"`, custom alias imports, and props passing (`<Card title="Hello" count={count} />`).
+- 🧩 **Component Architecture**: Modular component imports with `import Component from "./path"` inside `<script>`, custom alias imports, and props passing (`<Card title="Hello" count={count} />`).
+- 🔒 **Scoped CSS Imports**: `import "./dashboard.css";` inside a component's `<script>` styles that component only — Vue-SFC-style isolation, no class-name collisions.
 - 💡 **Reactive State Engine**: Write JS-like scripts with `let`, `function`, `onclick={fn}`, and reactive text interpolation (`{var}` and `{{var}}`).
 - 🎨 **Shadcn UI & Global CSS**: Centralized design system in `root/global.css` automatically inherited by all components with local `<style>` overrides.
 - 🖼️ **Hardware-Accelerated SVGs**: Drop raw `<svg src="icons/name.svg" />` files directly into templates with custom dimensions and color tinting.
@@ -146,9 +147,9 @@ app/                           # Native GPUI application shell
 ### 2. Passing Props to Reusable Components
 ```html
 <!-- Parent View -->
-@use UserCard from "./components/user_card.html"
-
 <script>
+  import UserCard from "./components/user_card.html";
+
   let stars = 42;
 </script>
 
@@ -167,7 +168,21 @@ app/                           # Native GPUI application shell
 </div>
 ```
 
-### 3. Conditional Rendering (Show / Hide)
+### 3. Scoped CSS Imports (Vue-style isolation)
+```html
+<!-- dashboard.html -->
+<script>
+  import "./dashboard.css";
+</script>
+
+<div class="card">
+  <!-- .card here gets ONLY this file's + global.css styles.
+       Other components using .card are unaffected. -->
+</div>
+```
+CSS files that are never imported stay global (e.g. `root/global.css`). An explicitly imported `.css` file is scoped to the importing component and removed from the global pool — so two components can even define the same class differently.
+
+### 4. Conditional Rendering (Show / Hide)
 ```html
 <script>
   let is_open = false;

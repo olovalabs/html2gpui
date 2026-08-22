@@ -36,28 +36,63 @@ pub fn rewrite_component_tags(src: &str) -> String {
     close.replace_all(&s, "</comp>").to_string()
 }
 
-pub fn strip_uses(raw: &str) -> (String, Vec<(String, String)>) {
-    let mut uses = Vec::new();
+/// Extracts JS-style imports written inside `<script>` blocks:
+/// - `import About from "./about.html";` -> component import (alias + path)
+/// - `import "./dashboard.css";`         -> scoped css import (path only)
+/// Returns the script/html source with those lines removed.
+#[derive(Default)]
+pub struct ScriptImports {
+    pub comps: Vec<(String, String)>,
+    pub css: Vec<String>,
+}
+
+pub fn strip_script_imports(
+    raw: &str,
+    warnings: &mut Vec<String>,
+) -> (String, ScriptImports) {
+    static COMP_IMPORT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static CSS_IMPORT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static ANY_IMPORT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let comp_re = COMP_IMPORT.get_or_init(|| {
+        regex::Regex::new(
+            r#"^\s*import\s+([A-Z][A-Za-z0-9_]*)\s+from\s+["']([^"']+)["']\s*;?\s*$"#,
+        )
+        .unwrap()
+    });
+    let css_re = CSS_IMPORT.get_or_init(|| {
+        regex::Regex::new(r#"^\s*import\s+["']([^"']+\.css)["']\s*;?\s*$"#).unwrap()
+    });
+    let any_re =
+        ANY_IMPORT.get_or_init(|| regex::Regex::new(r#"^\s*import\b"#).unwrap());
+
+    let mut imports = ScriptImports::default();
     let mut cleaned = String::new();
-    let mut seen_tag = false;
+    let mut in_script = false;
     for line in raw.lines() {
         let t = line.trim_start();
-        if !seen_tag && t.starts_with("@use") {
-            let parts: Vec<&str> = t.split_whitespace().collect();
-            if parts.len() >= 4 && parts[2] == "from" {
-                let alias = parts[1].to_string();
-                let import_path = parts[3..].join(" ");
-                uses.push((alias, import_path));
+        if t.starts_with("</script") {
+            in_script = false;
+        } else if t.starts_with("<script") {
+            in_script = true;
+        } else if in_script && any_re.is_match(line) {
+            if let Some(caps) = comp_re.captures(line) {
+                imports.comps.push((caps[1].to_string(), caps[2].to_string()));
                 continue;
             }
-        }
-        if t.contains('<') {
-            seen_tag = true;
+            if let Some(caps) = css_re.captures(line) {
+                imports.css.push(caps[1].to_string());
+                continue;
+            }
+            warnings.push(format!(
+                "unsupported import `{}` (use `import Name from \"./comp.html\";` or `import \"./style.css\";`)",
+                line.trim()
+            ));
+            continue;
         }
         cleaned.push_str(line);
         cleaned.push('\n');
     }
-    (cleaned, uses)
+    (cleaned, imports)
 }
 
 pub fn compile_component_ir(src: &str, ctx: &Ctx, warnings: &mut Vec<String>) -> Result<(IrElem, String)> {
