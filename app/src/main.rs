@@ -350,6 +350,10 @@ fn render_template(parts: &[TplPart], env: &Env) -> String {
                 Some(v) => out.push_str(&display(v)),
                 None => out.push_str(&format!("?{name}")),
             },
+            TplPart::Expr(e) => match html2gpui::eval_expr(e, env) {
+                Ok(v) => out.push_str(&display(&v)),
+                Err(err) => out.push_str(&format!("{{err: {err}}}")),
+            },
         }
     }
     out

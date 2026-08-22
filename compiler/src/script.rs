@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use crate::ast::{Env, Flow, IrScript, Value};
+use crate::ast::{Env, Expr, Flow, IrScript, Value};
 use crate::eval::{eval, exec, truthy};
 use crate::parser::Parser;
 use crate::tokenizer::tokenize;
@@ -64,6 +64,16 @@ pub fn invoke(env: &mut Env, script: &IrScript, src: &str) -> Result<Value> {
         }
     }
     Ok(result)
+}
+
+pub fn eval_expr(e: &Expr, env: &Env) -> Result<Value> {
+    let mut env_clone = env.clone();
+    let mut empty_locals = BTreeMap::new();
+    let funcs = BTreeMap::new();
+    let Flow::Value(v) = eval(e, &mut empty_locals, &mut env_clone, &funcs)? else {
+        return Err("unexpected return".into());
+    };
+    Ok(v)
 }
 
 pub fn eval_expr_str(env: &Env, script: &IrScript, src: &str) -> Result<Value> {

@@ -117,6 +117,16 @@ pub fn eval(
             };
             binop(op, &lv, &rv)?
         }
+        Expr::Ternary(c, t, e) => {
+            let Flow::Value(cv) = eval(c, locals, globals, funcs)? else {
+                return Err("`return` outside function".into());
+            };
+            let branch = if truthy(&cv) { t } else { e };
+            let Flow::Value(v) = eval(branch, locals, globals, funcs)? else {
+                return Err("`return` outside function".into());
+            };
+            v
+        }
         Expr::Call(name, args) => {
             let mut vals = Vec::new();
             for a in args {

@@ -21,7 +21,7 @@ pub enum Stmt {
     ExprStmt(Expr),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
     Num(f64),
     Str(String),
@@ -30,6 +30,7 @@ pub enum Expr {
     Var(String),
     Unary(String, Box<Expr>),
     Binary(String, Box<Expr>, Box<Expr>),
+    Ternary(Box<Expr>, Box<Expr>, Box<Expr>),
     Call(String, Vec<Expr>),
 }
 

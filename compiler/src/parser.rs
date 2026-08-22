@@ -202,7 +202,22 @@ impl Parser {
     }
 
     pub fn expr(&mut self) -> Result<Expr> {
-        self.or_expr()
+        let cond = self.or_expr()?;
+        if self.peek() == Some(&Tok::Punct("?")) {
+            self.next();
+            self.eat_newlines();
+            let then = self.expr()?;
+            self.eat_newlines();
+            self.expect_punct(":")?;
+            self.eat_newlines();
+            let els = self.expr()?;
+            return Ok(Expr::Ternary(
+                Box::new(cond),
+                Box::new(then),
+                Box::new(els),
+            ));
+        }
+        Ok(cond)
     }
     fn or_expr(&mut self) -> Result<Expr> {
         let mut l = self.and_expr()?;
@@ -309,6 +324,36 @@ impl Parser {
                         }
                     }
                     Ok(Expr::Call(name, args))
+                } else if self.peek() == Some(&Tok::Punct(".")) {
+                    // JSX-style member call: console.log(...) -> Call("log").
+                    // The receiver is ignored; the last segment is the fn.
+                    let mut last = name.clone();
+                    while self.peek() == Some(&Tok::Punct(".")) {
+                        self.next();
+                        let Some(Tok::Ident(seg)) = self.next() else {
+                            return Err("expected identifier after `.`".into());
+                        };
+                        last = seg;
+                    }
+                    if self.peek() == Some(&Tok::Punct("(")) {
+                        self.next();
+                        let mut args = Vec::new();
+                        loop {
+                            self.eat_newlines();
+                            if self.peek() == Some(&Tok::Punct(")")) {
+                                self.next();
+                                break;
+                            }
+                            args.push(self.expr()?);
+                            self.eat_newlines();
+                            if self.peek() == Some(&Tok::Punct(",")) {
+                                self.next();
+                            }
+                        }
+                        Ok(Expr::Call(last, args))
+                    } else {
+                        Ok(Expr::Var(last))
+                    }
                 } else {
                     Ok(Expr::Var(name))
                 }

@@ -60,20 +60,25 @@ pub fn ser_child(c: &IrChild, ind: usize, warnings: &mut Vec<String>, out: &mut 
             writeln!(out, "{pad})").unwrap();
         }
         IrChild::Tpl(parts) => {
-            let lits: Vec<&str> = parts
-                .iter()
-                .filter_map(|p| match p {
-                    TplPart::Lit(s) => Some(s.as_str()),
-                    TplPart::Var(_) => None,
-                })
-                .collect();
-            warnings.push(
-                "{{binding}} needs the runtime renderer (debug/dev mode); emitting static text".into(),
-            );
+            let mut out_s = String::new();
+            let mut has_expr = false;
+            for p in parts {
+                match p {
+                    TplPart::Lit(s) => out_s.push_str(s),
+                    TplPart::Var(name) => out_s.push_str(&format!("{{var {name}}}")),
+                    TplPart::Expr(_) => has_expr = true,
+                }
+            }
+            if has_expr {
+                warnings.push(
+                    "expression binding needs the runtime renderer (debug/dev mode); emitting static text"
+                        .into(),
+                );
+            }
             writeln!(
                 out,
                 r#"{pad}.child(SharedString::from("{}"))"#,
-                escape(&lits.join(" "))
+                escape(&out_s)
             )
             .unwrap();
         }

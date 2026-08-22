@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use crate::ast::IrScript;
+use crate::ast::{Expr, IrScript};
 
 pub type Result<T> = std::result::Result<T, String>;
 
@@ -44,6 +44,7 @@ pub enum IrChild {
 pub enum TplPart {
     Lit(String),
     Var(String),
+    Expr(Expr),
 }
 
 pub type Child = IrChild;

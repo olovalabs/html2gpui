@@ -101,6 +101,11 @@ pub fn tokenize(src: &str) -> Result<Vec<Tok>> {
                     '/' => "/",
                     '%' => "%",
                     '!' => "!",
+                    '?' => "?",
+                    ':' => ":",
+                    '.' => ".",
+                    '[' => "[",
+                    ']' => "]",
                     _ => return Err(format!("line {line}: unexpected `{c}`")),
                 };
                 let p: &'static str = if two.is_empty() { one } else { two };
