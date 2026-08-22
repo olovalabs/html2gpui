@@ -1,3 +1,10 @@
+<table>
+  <tr>
+    <img width="1823" height="863" alt="html2gpui" src="https://github.com/user-attachments/assets/83775e4f-1eee-4fa8-93e7-16e44f398b0d" />
+  </tr>
+</table>
+
+
 # html2gpui ⚡
 
 > Compile declarative HTML, CSS, and reactive JS components directly into high-performance, GPU-accelerated native desktop applications powered by [Zed's GPUI](https://github.com/zed-industries/zed).
