@@ -1,6 +1,6 @@
 <table>
   <tr>
-    <img width="1823" height="863" alt="html2gpui" src="https://github.com/user-attachments/assets/83775e4f-1eee-4fa8-93e7-16e44f398b0d" />
+    <img width="500" height="150" alt="html2gpui-logo" src="https://github.com/user-attachments/assets/a44c855c-e9ad-40cb-b481-f87731a0cd3e" />
   </tr>
 </table>
 
