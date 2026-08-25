@@ -20,7 +20,8 @@ impl Render for Workspace {
         let title = self.title();
         let tree = &self.tree;
         let open = self.open.clone();
-        let tree_scroll = self.tree_scroll;
+        let selected_path = self.selected_path.clone();
+        let explorer_section_expanded = self.explorer_section_expanded;
         let status = self.status.clone();
         let editor = self.editor.clone();
         let activity = self.activity;
@@ -78,6 +79,33 @@ impl Render for Workspace {
                 this.apply_theme(action.ix, window, cx);
             }))
             .on_action(cx.listener(|this, _: &About, _, cx| this.about(cx)))
+            .on_action(cx.listener(|this, _: &ExplorerRefresh, _, cx| {
+                this.refresh_explorer(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ExplorerCollapseAll, _, cx| {
+                this.collapse_all_folders(cx);
+            }))
+            .on_action(cx.listener(|this, action: &ExplorerNewFile, window, cx| {
+                this.new_file_in_dir(action.parent.clone(), window, cx);
+            }))
+            .on_action(cx.listener(|this, action: &ExplorerNewFolder, _, cx| {
+                this.new_folder_in_dir(action.parent.clone(), cx);
+            }))
+            .on_action(cx.listener(|this, action: &ExplorerRevealInFinder, _, cx| {
+                this.reveal_in_explorer(&action.path, cx);
+            }))
+            .on_action(cx.listener(|this, action: &ExplorerCopyPath, _, cx| {
+                this.copy_path(&action.path, cx);
+            }))
+            .on_action(cx.listener(|this, action: &ExplorerCopyRelativePath, _, cx| {
+                this.copy_relative_path(&action.path, cx);
+            }))
+            .on_action(cx.listener(|this, action: &ExplorerRename, _, cx| {
+                this.rename_entry(&action.path, cx);
+            }))
+            .on_action(cx.listener(|this, action: &ExplorerDelete, _, cx| {
+                this.delete_entry(&action.path, cx);
+            }))
             .child(ui::titlebar::render_titlebar(&title, &t, theme_ix))
             .child(
                 div()
@@ -95,7 +123,8 @@ impl Render for Workspace {
                                 Some(root) => ui::sidebar::explorer::render_tree(
                                     tree,
                                     open.as_ref(),
-                                    tree_scroll,
+                                    selected_path.as_ref(),
+                                    explorer_section_expanded,
                                     &display_name(root),
                                     &t,
                                     cx,
@@ -130,7 +159,7 @@ impl Render for Workspace {
                                                 .appearance(false)
                                                 .bordered(false),
                                         ),
-                                )
+                                 )
                             })
                             .when(show_terminal, |d| d.child(ui::terminal::render_terminal(&t))),
                     ),

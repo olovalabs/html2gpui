@@ -2,6 +2,8 @@
 //! and keyboard shortcuts. They decouple "what the user asked for" from the
 //! widget that observed the input.
 
+use std::path::PathBuf;
+
 use gpui::actions;
 
 actions!(
@@ -18,7 +20,9 @@ actions!(
         ShowExtensions,
         ToggleSidebar,
         ToggleTerminal,
-        About
+        About,
+        ExplorerRefresh,
+        ExplorerCollapseAll
     ]
 );
 
@@ -28,4 +32,46 @@ actions!(
 #[action(no_json)]
 pub struct SelectTheme {
     pub ix: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(no_json)]
+pub struct ExplorerNewFile {
+    pub parent: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(no_json)]
+pub struct ExplorerNewFolder {
+    pub parent: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(no_json)]
+pub struct ExplorerRevealInFinder {
+    pub path: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(no_json)]
+pub struct ExplorerCopyPath {
+    pub path: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(no_json)]
+pub struct ExplorerCopyRelativePath {
+    pub path: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(no_json)]
+pub struct ExplorerRename {
+    pub path: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(no_json)]
+pub struct ExplorerDelete {
+    pub path: PathBuf,
 }

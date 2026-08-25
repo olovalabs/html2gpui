@@ -10,7 +10,7 @@ use std::sync::Arc;
 use gpui::{AppContext, Context, Entity, Window};
 use gpui_component::input::{InputEvent, InputState, TabSize};
 
-use crate::fs_tree::{display_name, load_dir, TreeNode};
+use crate::fs_tree::{collapse_all, display_name, load_dir, reload_dir_preserving, TreeNode};
 use crate::lang;
 use crate::theme;
 
@@ -40,11 +40,12 @@ pub(crate) struct Workspace {
     pub(crate) root: Option<PathBuf>,
     pub(crate) tree: Vec<TreeNode>,
     pub(crate) open: Option<PathBuf>,
+    pub(crate) selected_path: Option<PathBuf>,
+    pub(crate) explorer_section_expanded: bool,
     /// Buffer was created via "New File" and has no path yet.
     pub(crate) untitled: bool,
     pub(crate) dirty: bool,
     pub(crate) status: String,
-    pub(crate) tree_scroll: f32,
     pub(crate) activity: Activity,
     pub(crate) show_sidebar: bool,
     pub(crate) show_terminal: bool,
@@ -82,10 +83,11 @@ impl Workspace {
             root: None,
             tree: Vec::new(),
             open: None,
+            selected_path: None,
+            explorer_section_expanded: true,
             untitled: false,
             dirty: false,
             status: "Welcome — open a folder or create a file to begin".into(),
-            tree_scroll: 0.0,
             activity: Activity::Explorer,
             show_sidebar: true,
             show_terminal: false,
@@ -149,6 +151,8 @@ impl Workspace {
     pub(crate) fn load_root(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.root = Some(path.clone());
         self.tree = load_dir(&path);
+        self.explorer_section_expanded = true;
+        self.selected_path = None;
         self.status = format!("Opened folder {}", display_name(&path));
         cx.notify();
     }
@@ -201,6 +205,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.selected_path = Some(path.clone());
         match std::fs::read(&path) {
             Ok(bytes) => {
                 if bytes.len() > 8_000_000 {
@@ -274,12 +279,16 @@ impl Workspace {
         match std::fs::write(&path, text.as_bytes()) {
             Ok(()) => {
                 self.open = Some(path.clone());
+                self.selected_path = Some(path.clone());
                 self.untitled = false;
                 self.dirty = false;
                 let lang_id = lang::language_for(&path).unwrap_or("text");
                 self.editor.update(cx, |state, cx| {
                     state.set_highlighter(lang_id, cx);
                 });
+                if let Some(root) = &self.root {
+                    self.tree = reload_dir_preserving(root, &self.tree);
+                }
                 self.status = format!("Saved {} · {}", path.display(), lang::lsp_status(&path));
             }
             Err(e) => self.status = format!("save failed: {e}"),
@@ -288,6 +297,7 @@ impl Workspace {
     }
 
     pub(crate) fn toggle_dir(&mut self, path: &Path, cx: &mut Context<Self>) {
+        self.selected_path = Some(path.to_path_buf());
         fn rec(nodes: &mut [TreeNode], path: &Path) -> bool {
             for n in nodes {
                 if n.path == path {
@@ -304,6 +314,194 @@ impl Workspace {
             false
         }
         rec(&mut self.tree, path);
+        cx.notify();
+    }
+
+    pub(crate) fn refresh_explorer(&mut self, cx: &mut Context<Self>) {
+        if let Some(root) = &self.root {
+            self.tree = reload_dir_preserving(root, &self.tree);
+            self.status = "Explorer refreshed".into();
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn collapse_all_folders(&mut self, cx: &mut Context<Self>) {
+        collapse_all(&mut self.tree);
+        self.status = "Collapsed all folders".into();
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_explorer_section(&mut self, cx: &mut Context<Self>) {
+        self.explorer_section_expanded = !self.explorer_section_expanded;
+        cx.notify();
+    }
+
+    pub(crate) fn new_file_in_dir(
+        &mut self,
+        parent: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target_dir = parent
+            .or_else(|| {
+                self.selected_path.as_ref().map(|p| {
+                    if p.is_dir() {
+                        p.clone()
+                    } else {
+                        p.parent().unwrap_or(p).to_path_buf()
+                    }
+                })
+            })
+            .or_else(|| self.root.clone());
+
+        let Some(dir) = target_dir else {
+            self.new_file(window, cx);
+            return;
+        };
+
+        let mut candidate = dir.join("untitled.txt");
+        let mut counter = 1;
+        while candidate.exists() {
+            candidate = dir.join(format!("untitled_{counter}.txt"));
+            counter += 1;
+        }
+
+        if let Ok(()) = std::fs::write(&candidate, b"") {
+            if let Some(root) = &self.root {
+                self.tree = reload_dir_preserving(root, &self.tree);
+            }
+            self.open_file(candidate.clone(), window, cx);
+            self.status = format!("Created {}", display_name(&candidate));
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn new_folder_in_dir(
+        &mut self,
+        parent: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        let target_dir = parent
+            .or_else(|| {
+                self.selected_path.as_ref().map(|p| {
+                    if p.is_dir() {
+                        p.clone()
+                    } else {
+                        p.parent().unwrap_or(p).to_path_buf()
+                    }
+                })
+            })
+            .or_else(|| self.root.clone());
+
+        let Some(dir) = target_dir else {
+            return;
+        };
+
+        let mut candidate = dir.join("new_folder");
+        let mut counter = 1;
+        while candidate.exists() {
+            candidate = dir.join(format!("new_folder_{counter}"));
+            counter += 1;
+        }
+
+        if let Ok(()) = std::fs::create_dir_all(&candidate) {
+            if let Some(root) = &self.root {
+                self.tree = reload_dir_preserving(root, &self.tree);
+            }
+            self.selected_path = Some(candidate.clone());
+            self.status = format!("Created folder {}", display_name(&candidate));
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn reveal_in_explorer(&mut self, path: &Path, cx: &mut Context<Self>) {
+        #[cfg(target_os = "windows")]
+        {
+            let _ = std::process::Command::new("explorer")
+                .arg(format!("/select,{}", path.display()))
+                .spawn();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("open")
+                .arg("-R")
+                .arg(path)
+                .spawn();
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let _ = std::process::Command::new("xdg-open")
+                .arg(path.parent().unwrap_or(path))
+                .spawn();
+        }
+        self.status = format!("Revealed {}", display_name(path));
+        cx.notify();
+    }
+
+    pub(crate) fn copy_path(&mut self, path: &Path, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(path.to_string_lossy().to_string()));
+        self.status = format!("Copied path: {}", path.display());
+        cx.notify();
+    }
+
+    pub(crate) fn copy_relative_path(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let rel = if let Some(root) = &self.root {
+            path.strip_prefix(root).unwrap_or(path)
+        } else {
+            path
+        };
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(rel.to_string_lossy().to_string()));
+        self.status = format!("Copied relative path: {}", rel.display());
+        cx.notify();
+    }
+
+    pub(crate) fn delete_entry(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let is_dir = path.is_dir();
+        let res = if is_dir {
+            std::fs::remove_dir_all(path)
+        } else {
+            std::fs::remove_file(path)
+        };
+        if res.is_ok() {
+            if self.open.as_ref() == Some(&path.to_path_buf()) {
+                self.open = None;
+                self.dirty = false;
+            }
+            if self.selected_path.as_ref() == Some(&path.to_path_buf()) {
+                self.selected_path = None;
+            }
+            if let Some(root) = &self.root {
+                self.tree = reload_dir_preserving(root, &self.tree);
+            }
+            self.status = format!("Deleted {}", display_name(path));
+        } else if let Err(e) = res {
+            self.status = format!("Failed to delete: {e}");
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn rename_entry(&mut self, path: &Path, cx: &mut Context<Self>) {
+        if let Some(parent) = path.parent() {
+            let name = display_name(path);
+            if let Some(new_path) = rfd::FileDialog::new()
+                .set_directory(parent)
+                .set_file_name(&name)
+                .save_file()
+            {
+                if std::fs::rename(path, &new_path).is_ok() {
+                    if self.open.as_ref() == Some(&path.to_path_buf()) {
+                        self.open = Some(new_path.clone());
+                    }
+                    if self.selected_path.as_ref() == Some(&path.to_path_buf()) {
+                        self.selected_path = Some(new_path.clone());
+                    }
+                    if let Some(root) = &self.root {
+                        self.tree = reload_dir_preserving(root, &self.tree);
+                    }
+                    self.status = format!("Renamed to {}", display_name(&new_path));
+                }
+            }
+        }
         cx.notify();
     }
 
