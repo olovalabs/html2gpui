@@ -20,7 +20,7 @@ Default theme: **GitHub Dark** (from
 plus Ayu and Gruvbox families. The JSONs in `app/assets/themes/` are verbatim
 Zed theme files consumed two ways:
 
-1. UI chrome colors → `src/theme.rs` tokens
+1. UI chrome colors → `src/theme/colors.rs` tokens
 2. the full `syntax` token table (46 entries) + editor colors → forwarded
    untouched into gpui-component's `HighlightTheme`, whose schema is
    explicitly Zed-compatible. Tree-sitter captures (`keyword`, `function`,
@@ -29,7 +29,7 @@ Zed theme files consumed two ways:
 
 ## Language servers
 
-`src/main.rs` maps each language to the LSP binary Zed uses by default
+`src/lang.rs` maps each language to the LSP binary Zed uses by default
 (rust-analyzer, gopls, basedpyright, clangd, typescript-language-server,
 zls, …), detects it on PATH and reports readiness in the status bar when you
 open a matching file. Wiring an actual server process (JSON-RPC stdio →
