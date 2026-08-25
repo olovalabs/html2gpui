@@ -71,9 +71,11 @@ impl Workspace {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let editor = cx.new(|cx| {
             InputState::new(window, cx)
-                .code_editor("rust")
+                .code_editor("text")
                 .line_number(true)
+                .indent_guides(false)
                 .soft_wrap(false)
+                .searchable(true)
                 .tab_size(TabSize {
                     tab_size: 4,
                     hard_tabs: false,
@@ -82,7 +84,7 @@ impl Workspace {
         });
 
         cx.subscribe(&editor, |this, _state, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) && this.open.is_some() {
+            if matches!(event, InputEvent::Change) && this.open.is_some() && !this.dirty {
                 this.dirty = true;
                 cx.notify();
             }
@@ -103,6 +105,8 @@ impl Workspace {
             editor,
         }
     }
+    
+  
 
     fn set_activity(&mut self, activity: Activity, cx: &mut Context<Self>) {
         self.activity = activity;
@@ -114,8 +118,8 @@ impl Workspace {
         cx.notify();
     }
 
-    fn language_for(path: &Path) -> &'static str {
-        match path
+    fn language_for(path: &Path) -> Option<&'static str> {
+        Some(match path
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")
@@ -138,15 +142,15 @@ impl Workspace {
             "java" => "java",
             "rb" => "ruby",
             "sh" | "bash" => "bash",
-            _ => "rust",
-        }
+            _ => return None,
+        })
     }
 
     fn open_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         match std::fs::read(&path) {
             Ok(bytes) => {
-                if bytes.len() > 2_000_000 {
-                    self.status = format!("{} is too large (>2MB)", display_name(&path));
+                if bytes.len() > 8_000_000 {
+                    self.status = format!("{} is too large (>8MB)", display_name(&path));
                     cx.notify();
                     return;
                 }
@@ -155,15 +159,29 @@ impl Workspace {
                     cx.notify();
                     return;
                 }
+                let newline_count = bytes.iter().filter(|&&b| b == b'\n').count();
+                let highlight = bytes.len() <= 400_000 && newline_count <= 8_000;
+                let lang = if highlight {
+                    Self::language_for(&path).unwrap_or("text")
+                } else {
+                    "text"
+                };
                 let text = String::from_utf8_lossy(&bytes).into_owned();
-                let lang = Self::language_for(&path);
                 self.editor.update(cx, |state, cx| {
+                    state.set_indent_guides(false, window, cx);
                     state.set_highlighter(lang, cx);
                     state.set_value(text, window, cx);
                 });
                 self.open = Some(path.clone());
                 self.dirty = false;
-                self.status = path.display().to_string();
+                self.status = if highlight {
+                    path.display().to_string()
+                } else {
+                    format!(
+                        "{}  (plain — highlight off for large files)",
+                        path.display()
+                    )
+                };
             }
             Err(e) => self.status = format!("open failed: {e}"),
         }
@@ -226,7 +244,7 @@ impl Render for Workspace {
             }
             None => display_name(&self.root),
         };
-        let tree = self.tree.clone();
+        let tree = &self.tree;
         let open = self.open.clone();
         let tree_scroll = self.tree_scroll;
         let status = self.status.clone();
@@ -283,7 +301,7 @@ impl Render for Workspace {
                     .when(show_sidebar, |d| {
                         d.child(match activity {
                             Activity::Explorer => {
-                                render_tree(tree, open, tree_scroll, &folder, cx)
+                                render_tree(tree, open.as_ref(), tree_scroll, &folder, cx)
                             }
                             Activity::Git => placeholder_side(
                                 "SOURCE CONTROL",
@@ -303,7 +321,18 @@ impl Render for Workspace {
                             .flex()
                             .flex_col()
                             .bg(rgb(BG))
-                            .child(div().flex_1().min_h(px(0.0)).child(Input::new(&editor).h_full()))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h(px(0.0))
+                                    .overflow_hidden()
+                                    .child(
+                                        Input::new(&editor)
+                                            .h_full()
+                                            .appearance(false)
+                                            .bordered(false),
+                                    ),
+                            )
                             .when(show_terminal, |d| d.child(render_terminal())),
                     ),
             )
@@ -516,22 +545,22 @@ fn placeholder_side(title: &'static str, body: &'static str) -> gpui::AnyElement
 }
 
 fn render_tree(
-    nodes: Vec<TreeNode>,
-    open: Option<PathBuf>,
+    nodes: &[TreeNode],
+    open: Option<&PathBuf>,
     scroll_y: f32,
     folder: &str,
     cx: &mut Context<Workspace>,
 ) -> gpui::AnyElement {
-    let mut rows: Vec<(TreeNode, usize)> = Vec::new();
-    fn walk(nodes: &[TreeNode], depth: usize, out: &mut Vec<(TreeNode, usize)>) {
+    let mut rows: Vec<(&TreeNode, usize)> = Vec::new();
+    fn walk<'a>(nodes: &'a [TreeNode], depth: usize, out: &mut Vec<(&'a TreeNode, usize)>) {
         for n in nodes {
-            out.push((n.clone(), depth));
+            out.push((n, depth));
             if n.is_dir && n.expanded {
                 walk(&n.children, depth + 1, out);
             }
         }
     }
-    walk(&nodes, 0, &mut rows);
+    walk(nodes, 0, &mut rows);
 
     let mut col = div()
         .w(px(260.0))
@@ -581,7 +610,7 @@ fn render_tree(
         if i > 400 {
             break;
         }
-        let selected = open.as_ref().is_some_and(|p| p == &node.path);
+        let selected = open.is_some_and(|p| p == &node.path);
         let path = node.path.clone();
         let is_dir = node.is_dir;
         let pad = 8.0 + depth as f32 * 12.0;

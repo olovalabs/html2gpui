@@ -1,3 +1,8 @@
 [workspace]
 members = ["app"]
 resolver = "2"
+
+# GPUI + tree-sitter are extremely slow in unoptimized debug builds.
+# Zed ships release; this keeps `cargo run` usable on large files.
+[profile.dev.package."*"]
+opt-level = 2
