@@ -1,15 +1,6 @@
-//! File icons resolved from the file extension / name, using Zed's default
-//! icon theme ("Zed (Default)").
+//! File icons resolved using the official `vscode-icons` theme (vscode-icons/vscode-icons).
 //!
-//! Ported from zed-industries/zed:
-//! - `crates/theme/src/icon_theme.rs`  (association tables)
-//! - `crates/file_icons/src/file_icons.rs` (lookup algorithm)
-//!
-//! The SVG assets live in `app/assets/file_icons/` and are embedded via
-//! rust-embed; paths here are asset-source paths like `file_icons/rust.svg`.
-//!
-//! Icons are multicolor, so render them with `gpui::img()` — gpui's `svg()`
-//! element only paints a single tint color.
+//! The SVG assets live in `app/assets/file_icons/` and are embedded via rust-embed.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -19,8 +10,48 @@ use std::sync::OnceLock;
 const FILE_STEMS: &[(&str, &str)] = &[
     ("Containerfile", "docker"),
     ("Dockerfile", "docker"),
+    ("docker-compose.yml", "docker"),
+    ("docker-compose.yaml", "docker"),
+    ("compose.yml", "docker"),
+    ("compose.yaml", "docker"),
+    ("Cargo.toml", "cargo"),
+    ("Cargo.lock", "cargo"),
+    ("package.json", "npm"),
+    ("package-lock.json", "npm"),
+    ("bun.lock", "bun"),
+    ("bun.lockb", "bun"),
+    ("bunfig.toml", "bun"),
+    ("yarn.lock", "yarn"),
+    ("pnpm-lock.yaml", "pnpm"),
     ("Podfile", "ruby"),
-    ("Procfile", "heroku"),
+    ("Procfile", "procfile"),
+    ("turbo.json", "turbo"),
+    ("tsconfig.json", "typescript"),
+    ("jsconfig.json", "jsconfig"),
+    ("vite.config.js", "vite"),
+    ("vite.config.ts", "vite"),
+    ("vite.config.mjs", "vite"),
+    ("tailwind.config.js", "tailwind"),
+    ("tailwind.config.ts", "tailwind"),
+    ("next.config.js", "next"),
+    ("next.config.mjs", "next"),
+    ("next.config.ts", "next"),
+    ("astro.config.mjs", "astro"),
+    ("astro.config.ts", "astro"),
+    (".gitignore", "git"),
+    (".gitattributes", "git"),
+    (".gitmodules", "git"),
+    (".dockerignore", "docker"),
+    (".npmrc", "npm"),
+    ("pnpm-workspace.yaml", "pnpm"),
+    (".prettierignore", "prettier"),
+    (".editorconfig", "editorconfig"),
+    (".prettierrc", "prettier"),
+    (".eslintrc", "eslint"),
+    ("LICENSE", "license"),
+    ("LICENCE", "license"),
+    ("README.md", "markdown"),
+    ("CHANGELOG.md", "markdown"),
 ];
 
 /// Name/extension suffixes → icon type. Matched against progressively
@@ -28,191 +59,157 @@ const FILE_STEMS: &[(&str, &str)] = &[
 #[rustfmt::skip]
 const FILE_SUFFIXES: &[(&str, &str)] = &[
     ("astro", "astro"),
-    ("aac", "audio"), ("flac", "audio"), ("m4a", "audio"), ("mka", "audio"), ("mp3", "audio"), ("ogg", "audio"), ("opus", "audio"), ("wav", "audio"), ("wma", "audio"), ("wv", "audio"),
-    ("bak", "backup"),
-    ("bal", "ballerina"),
-    ("bicep", "bicep"),
-    ("lockb", "bun"),
+    ("aac", "audio"), ("flac", "audio"), ("m4a", "audio"), ("mka", "audio"), ("mp3", "audio"), ("ogg", "audio"), ("opus", "audio"), ("wav", "audio"), ("wma", "audio"),
+    ("bat", "bat"), ("cmd", "bat"),
+    ("bun", "bun"), ("lockb", "bun"),
     ("c", "c"), ("h", "c"),
-    ("cairo", "cairo"),
-    ("handlebars", "code"), ("metadata", "code"), ("rkt", "code"), ("scm", "code"),
-    ("coffee", "coffeescript"),
-    ("c++", "cpp"), ("h++", "cpp"), ("cc", "cpp"), ("cpp", "cpp"), ("cppm", "cpp"), ("cxx", "cpp"), ("hh", "cpp"), ("hpp", "cpp"), ("hxx", "cpp"), ("inl", "cpp"), ("ixx", "cpp"),
-    ("cr", "crystal"), ("ecr", "crystal"),
-    ("cs", "csharp"),
-    ("csproj", "csproj"),
-    ("css", "css"), ("pcss", "css"), ("postcss", "css"),
-    ("cue", "cue"),
+    ("cpp", "cpp"), ("h++", "cpp"), ("cc", "cpp"), ("cppm", "cpp"), ("cxx", "cpp"), ("hh", "cpp"), ("hpp", "cpp"), ("hxx", "cpp"), ("inl", "cpp"), ("ixx", "cpp"),
+    ("cs", "csharp"), ("csx", "csharp"),
+    ("css", "css"), ("pcss", "postcss"), ("postcss", "postcss"),
     ("dart", "dart"),
-    ("diff", "diff"),
-    ("docker-compose.yml", "docker"), ("docker-compose.yaml", "docker"), ("compose.yml", "docker"), ("compose.yaml", "docker"),
-    ("doc", "document"), ("docx", "document"), ("mdx", "document"), ("odp", "document"), ("ods", "document"), ("odt", "document"), ("pdf", "document"), ("ppt", "document"), ("pptx", "document"), ("rtf", "document"), ("txt", "document"), ("xls", "document"), ("xlsx", "document"),
+    ("d.ts", "typescriptdef"), ("d.mts", "typescriptdef"), ("d.cts", "typescriptdef"),
+    ("docker", "docker"),
     ("editorconfig", "editorconfig"),
-    ("eex", "elixir"), ("ex", "elixir"), ("exs", "elixir"), ("heex", "elixir"), ("leex", "elixir"), ("neex", "elixir"),
-    ("elm", "elm"),
-    ("Emakefile", "erlang"), ("app.src", "erlang"), ("erl", "erlang"), ("escript", "erlang"), ("hrl", "erlang"), ("rebar.config", "erlang"), ("xrl", "erlang"), ("yrl", "erlang"),
+    ("eex", "elixir"), ("ex", "elixir"), ("exs", "elixir"), ("heex", "elixir"), ("leex", "elixir"),
+    ("erl", "erlang"), ("hrl", "erlang"),
     ("eslint.config.cjs", "eslint"), ("eslint.config.cts", "eslint"), ("eslint.config.js", "eslint"), ("eslint.config.mjs", "eslint"), ("eslint.config.mts", "eslint"), ("eslint.config.ts", "eslint"), ("eslintrc", "eslint"), ("eslintrc.js", "eslint"), ("eslintrc.json", "eslint"),
     ("otf", "font"), ("ttf", "font"), ("woff", "font"), ("woff2", "font"),
-    ("fs", "fsharp"),
-    ("fsproj", "fsproj"),
-    ("gitlab-ci.yml", "gitlab"), ("gitlab-ci.yaml", "gitlab"),
-    ("gleam", "gleam"),
+    ("fs", "fsharp"), ("fsi", "fsharp"), ("fsx", "fsharp"),
+    ("git", "git"), ("gitignore", "git"), ("gitattributes", "git"), ("gitmodules", "git"),
     ("go", "go"), ("mod", "go"), ("work", "go"),
     ("gql", "graphql"), ("graphql", "graphql"), ("graphqls", "graphql"),
-    ("hs", "haskell"),
-    ("hcl", "hcl"),
-    ("helmfile.yaml", "helm"), ("helmfile.yml", "helm"), ("Chart.yaml", "helm"), ("Chart.yml", "helm"), ("Chart.lock", "helm"), ("values.yaml", "helm"), ("values.yml", "helm"), ("requirements.yaml", "helm"), ("requirements.yml", "helm"), ("tpl", "helm"),
+    ("hs", "haskell"), ("lhs", "haskell"),
     ("htm", "html"), ("html", "html"),
-    ("avif", "image"), ("bmp", "image"), ("gif", "image"), ("heic", "image"), ("heif", "image"), ("ico", "image"), ("j2k", "image"), ("jfif", "image"), ("jp2", "image"), ("jpeg", "image"), ("jpg", "image"), ("jxl", "image"), ("png", "image"), ("psd", "image"), ("qoi", "image"), ("svg", "image"), ("tiff", "image"), ("webp", "image"),
-    ("ipynb", "ipynb"),
-    ("java", "java"),
+    ("avif", "image"), ("bmp", "image"), ("gif", "image"), ("heic", "image"), ("ico", "image"), ("jpeg", "image"), ("jpg", "image"), ("png", "image"), ("psd", "image"), ("svg", "svg"), ("tiff", "image"), ("webp", "image"),
+    ("ini", "ini"), ("conf", "ini"), ("cfg", "ini"),
+    ("java", "java"), ("jar", "java"), ("class", "java"),
     ("cjs", "javascript"), ("js", "javascript"), ("mjs", "javascript"),
-    ("json", "json"), ("jsonc", "json"),
+    ("json", "json"), ("jsonc", "json"), ("json5", "json5"), ("jsonld", "jsonld"),
     ("jl", "julia"),
-    ("kdl", "kdl"),
-    ("kt", "kotlin"),
-    ("lock", "lock"),
-    ("log", "log"),
-    ("lua", "lua"),
-    ("luau", "luau"),
+    ("kt", "kotlin"), ("kts", "kotlin"),
+    ("less", "less"),
+    ("lua", "lua"), ("luau", "lua"),
     ("markdown", "markdown"), ("md", "markdown"),
-    ("metal", "metal"),
-    ("nim", "nim"), ("nims", "nim"), ("nimble", "nim"),
-    ("nix", "nix"),
-    ("ml", "ocaml"), ("mli", "ocaml"), ("mlx", "ocaml"),
-    ("odin", "odin"),
+    ("mdx", "mdx"),
+    ("nim", "nim"), ("nims", "nim"),
+    ("ml", "ocaml"), ("mli", "ocaml"),
+    ("pdf", "pdf"),
     ("php", "php"),
-    ("prettier.config.cjs", "prettier"), ("prettier.config.js", "prettier"), ("prettier.config.mjs", "prettier"), ("prettierignore", "prettier"), ("prettierrc", "prettier"), ("prettierrc.cjs", "prettier"), ("prettierrc.js", "prettier"), ("prettierrc.json", "prettier"), ("prettierrc.json5", "prettier"), ("prettierrc.mjs", "prettier"), ("prettierrc.toml", "prettier"), ("prettierrc.yaml", "prettier"), ("prettierrc.yml", "prettier"),
+    ("prettier.config.cjs", "prettier"), ("prettier.config.js", "prettier"), ("prettier.config.mjs", "prettier"), ("prettierignore", "prettier"), ("prettierrc", "prettier"), ("prettierrc.js", "prettier"), ("prettierrc.json", "prettier"),
     ("prisma", "prisma"),
-    ("pp", "puppet"),
-    ("py", "python"),
+    ("py", "python"), ("pyw", "python"), ("ipynb", "python"),
     ("r", "r"), ("R", "r"),
-    ("cjsx", "react"), ("ctsx", "react"), ("jsx", "react"), ("mjsx", "react"), ("mtsx", "react"), ("tsx", "react"),
-    ("roc", "roc"),
+    ("jsx", "reactjs"), ("cjsx", "reactjs"), ("mjsx", "reactjs"),
+    ("tsx", "reactts"), ("ctsx", "reactts"), ("mtsx", "reactts"),
     ("rb", "ruby"),
     ("rs", "rust"),
     ("sass", "sass"), ("scss", "sass"),
     ("scala", "scala"), ("sc", "scala"),
-    ("conf", "settings"), ("ini", "settings"),
+    ("sh", "shell"), ("bash", "shell"), ("zsh", "shell"), ("fish", "shell"),
+    ("ps1", "powershell"), ("psm1", "powershell"), ("psd1", "powershell"),
     ("sol", "solidity"),
-    ("accdb", "storage"), ("csv", "storage"), ("dat", "storage"), ("db", "storage"), ("dbf", "storage"), ("dll", "storage"), ("fmp", "storage"), ("fp7", "storage"), ("frm", "storage"), ("gdb", "storage"), ("ib", "storage"), ("ldf", "storage"), ("mdb", "storage"), ("mdf", "storage"), ("myd", "storage"), ("myi", "storage"), ("pdb", "storage"), ("psv", "storage"), ("RData", "storage"), ("rdata", "storage"), ("sav", "storage"), ("sdf", "storage"), ("sql", "storage"), ("sqlite", "storage"), ("ssv", "storage"), ("tsv", "storage"),
-    ("stylelint.config.cjs", "stylelint"), ("stylelint.config.js", "stylelint"), ("stylelint.config.mjs", "stylelint"), ("stylelintignore", "stylelint"), ("stylelintrc", "stylelint"), ("stylelintrc.cjs", "stylelint"), ("stylelintrc.js", "stylelint"), ("stylelintrc.json", "stylelint"), ("stylelintrc.mjs", "stylelint"), ("stylelintrc.yaml", "stylelint"), ("stylelintrc.yml", "stylelint"),
-    ("surql", "surrealql"),
+    ("proto", "protobuf"),
+    ("wasm", "wasm"),
+    ("babelrc", "babel"),
+    ("sql", "sql"), ("sqlite", "sql"), ("sqlite3", "sql"), ("db", "sql"),
     ("svelte", "svelte"),
     ("swift", "swift"),
-    ("tcl", "tcl"),
-    ("hbs", "template"), ("plist", "template"), ("xml", "template"),
-    ("bash", "terminal"), ("bash_aliases", "terminal"), ("bash_login", "terminal"), ("bash_logout", "terminal"), ("bash_profile", "terminal"), ("bashrc", "terminal"), ("brushrc", "terminal"), ("fish", "terminal"), ("nu", "terminal"), ("profile", "terminal"), ("ps1", "terminal"), ("sh", "terminal"), ("zlogin", "terminal"), ("zlogout", "terminal"), ("zprofile", "terminal"), ("zsh", "terminal"), ("zsh_aliases", "terminal"), ("zsh_histfile", "terminal"), ("zsh_history", "terminal"), ("zshenv", "terminal"), ("zshrc", "terminal"),
     ("tf", "terraform"), ("tfvars", "terraform"),
     ("toml", "toml"),
+    ("txt", "text"), ("text", "text"), ("log", "text"),
     ("cts", "typescript"), ("mts", "typescript"), ("ts", "typescript"),
-    ("v", "v"), ("vsh", "v"), ("vv", "v"),
-    ("COMMIT_EDITMSG", "vcs"), ("EDIT_DESCRIPTION", "vcs"), ("MERGE_MSG", "vcs"), ("NOTES_EDITMSG", "vcs"), ("TAG_EDITMSG", "vcs"), ("gitattributes", "vcs"), ("gitignore", "vcs"), ("gitkeep", "vcs"), ("gitmodules", "vcs"),
-    ("vbproj", "vbproj"),
-    ("avi", "video"), ("m4v", "video"), ("mkv", "video"), ("mov", "video"), ("mp4", "video"), ("webm", "video"), ("wmv", "video"),
-    ("sln", "vs_sln"),
-    ("suo", "vs_suo"),
     ("vue", "vue"),
-    ("vy", "vyper"), ("vyi", "vyper"),
-    ("wgsl", "wgsl"),
     ("yaml", "yaml"), ("yml", "yaml"),
     ("zig", "zig"),
+    ("zip", "zip"), ("tar", "zip"), ("gz", "zip"), ("7z", "zip"), ("rar", "zip"),
 ];
 
-/// Icon type → SVG asset path.
+/// Icon type → official vscode-icons SVG asset path.
 const TYPE_ICONS: &[(&str, &str)] = &[
-    ("astro", "file_icons/astro.svg"),
-    ("audio", "file_icons/audio.svg"),
-    ("ballerina", "file_icons/ballerina.svg"),
-    ("bicep", "file_icons/file.svg"),
-    ("bun", "file_icons/bun.svg"),
-    ("c", "file_icons/c.svg"),
-    ("cairo", "file_icons/cairo.svg"),
-    ("code", "file_icons/code.svg"),
-    ("coffeescript", "file_icons/coffeescript.svg"),
-    ("cpp", "file_icons/cpp.svg"),
-    ("crystal", "file_icons/file.svg"),
-    ("csharp", "file_icons/file.svg"),
-    ("csproj", "file_icons/file.svg"),
-    ("css", "file_icons/css.svg"),
-    ("cue", "file_icons/file.svg"),
-    ("dart", "file_icons/dart.svg"),
-    ("default", "file_icons/file.svg"),
-    ("diff", "file_icons/diff.svg"),
-    ("docker", "file_icons/docker.svg"),
-    ("document", "file_icons/book.svg"),
-    ("editorconfig", "file_icons/editorconfig.svg"),
-    ("elixir", "file_icons/elixir.svg"),
-    ("elm", "file_icons/elm.svg"),
-    ("erlang", "file_icons/erlang.svg"),
-    ("eslint", "file_icons/eslint.svg"),
-    ("font", "file_icons/font.svg"),
-    ("fsharp", "file_icons/fsharp.svg"),
-    ("fsproj", "file_icons/file.svg"),
-    ("gitlab", "file_icons/gitlab.svg"),
-    ("gleam", "file_icons/gleam.svg"),
-    ("go", "file_icons/go.svg"),
-    ("graphql", "file_icons/graphql.svg"),
-    ("haskell", "file_icons/haskell.svg"),
-    ("hcl", "file_icons/hcl.svg"),
-    ("helm", "file_icons/helm.svg"),
-    ("heroku", "file_icons/heroku.svg"),
-    ("html", "file_icons/html.svg"),
-    ("image", "file_icons/image.svg"),
-    ("ipynb", "file_icons/jupyter.svg"),
-    ("java", "file_icons/java.svg"),
-    ("javascript", "file_icons/javascript.svg"),
-    ("json", "file_icons/code.svg"),
-    ("julia", "file_icons/julia.svg"),
-    ("kdl", "file_icons/kdl.svg"),
-    ("kotlin", "file_icons/kotlin.svg"),
-    ("lock", "file_icons/lock.svg"),
-    ("log", "file_icons/info.svg"),
-    ("lua", "file_icons/lua.svg"),
-    ("luau", "file_icons/luau.svg"),
-    ("markdown", "file_icons/book.svg"),
-    ("metal", "file_icons/metal.svg"),
-    ("nim", "file_icons/nim.svg"),
-    ("nix", "file_icons/nix.svg"),
-    ("ocaml", "file_icons/ocaml.svg"),
-    ("odin", "file_icons/odin.svg"),
-    ("phoenix", "file_icons/phoenix.svg"),
-    ("php", "file_icons/php.svg"),
-    ("prettier", "file_icons/prettier.svg"),
-    ("prisma", "file_icons/prisma.svg"),
-    ("puppet", "file_icons/puppet.svg"),
-    ("python", "file_icons/python.svg"),
-    ("r", "file_icons/r.svg"),
-    ("react", "file_icons/react.svg"),
-    ("roc", "file_icons/roc.svg"),
-    ("ruby", "file_icons/ruby.svg"),
-    ("rust", "file_icons/rust.svg"),
-    ("sass", "file_icons/sass.svg"),
-    ("scala", "file_icons/scala.svg"),
-    ("settings", "file_icons/settings.svg"),
-    ("solidity", "file_icons/file.svg"),
-    ("storage", "file_icons/database.svg"),
-    ("stylelint", "file_icons/javascript.svg"),
-    ("surrealql", "file_icons/surrealql.svg"),
-    ("svelte", "file_icons/html.svg"),
-    ("swift", "file_icons/swift.svg"),
-    ("tcl", "file_icons/tcl.svg"),
-    ("template", "file_icons/html.svg"),
-    ("terminal", "file_icons/terminal.svg"),
-    ("terraform", "file_icons/terraform.svg"),
-    ("toml", "file_icons/toml.svg"),
-    ("typescript", "file_icons/typescript.svg"),
-    ("v", "file_icons/v.svg"),
-    ("vbproj", "file_icons/file.svg"),
-    ("vcs", "file_icons/git.svg"),
-    ("video", "file_icons/video.svg"),
-    ("vs_sln", "file_icons/file.svg"),
-    ("vs_suo", "file_icons/file.svg"),
-    ("vue", "file_icons/vue.svg"),
-    ("vyper", "file_icons/vyper.svg"),
-    ("wgsl", "file_icons/wgsl.svg"),
-    ("yaml", "file_icons/yaml.svg"),
-    ("zig", "file_icons/zig.svg"),
+    ("astro", "file_icons/file_type_astro.svg"),
+    ("audio", "file_icons/file_type_audio.svg"),
+    ("babel", "file_icons/file_type_babel.svg"),
+    ("bat", "file_icons/file_type_bat.svg"),
+    ("bun", "file_icons/file_type_bun.svg"),
+    ("c", "file_icons/file_type_c.svg"),
+    ("cargo", "file_icons/file_type_cargo.svg"),
+    ("cpp", "file_icons/file_type_cpp.svg"),
+    ("csharp", "file_icons/file_type_csharp.svg"),
+    ("css", "file_icons/file_type_css.svg"),
+    ("dart", "file_icons/file_type_dartlang.svg"),
+    ("default", "file_icons/default_file.svg"),
+    ("docker", "file_icons/file_type_docker.svg"),
+    ("dotenv", "file_icons/file_type_dotenv.svg"),
+    ("editorconfig", "file_icons/file_type_editorconfig.svg"),
+    ("elixir", "file_icons/file_type_elixir.svg"),
+    ("erlang", "file_icons/file_type_erlang.svg"),
+    ("eslint", "file_icons/file_type_eslint.svg"),
+    ("flutter", "file_icons/file_type_flutter.svg"),
+    ("font", "file_icons/file_type_font.svg"),
+    ("fsharp", "file_icons/file_type_fsharp.svg"),
+    ("git", "file_icons/file_type_git.svg"),
+    ("go", "file_icons/file_type_go.svg"),
+    ("graphql", "file_icons/file_type_graphql.svg"),
+    ("haskell", "file_icons/file_type_haskell.svg"),
+    ("html", "file_icons/file_type_html.svg"),
+    ("image", "file_icons/file_type_image.svg"),
+    ("ini", "file_icons/file_type_ini.svg"),
+    ("java", "file_icons/file_type_java.svg"),
+    ("javascript", "file_icons/file_type_js.svg"),
+    ("jsconfig", "file_icons/file_type_jsconfig.svg"),
+    ("json", "file_icons/file_type_json.svg"),
+    ("json5", "file_icons/file_type_json5.svg"),
+    ("jsonld", "file_icons/file_type_jsonld.svg"),
+    ("julia", "file_icons/file_type_julia.svg"),
+    ("kotlin", "file_icons/file_type_kotlin.svg"),
+    ("less", "file_icons/file_type_less.svg"),
+    ("license", "file_icons/file_type_license.svg"),
+    ("lua", "file_icons/file_type_lua.svg"),
+    ("markdown", "file_icons/file_type_markdown.svg"),
+    ("mdx", "file_icons/file_type_mdx.svg"),
+    ("next", "file_icons/file_type_next.svg"),
+    ("nim", "file_icons/file_type_nim.svg"),
+    ("npm", "file_icons/file_type_npm.svg"),
+    ("ocaml", "file_icons/file_type_ocaml.svg"),
+    ("pdf", "file_icons/file_type_pdf.svg"),
+    ("php", "file_icons/file_type_php.svg"),
+    ("pnpm", "file_icons/file_type_pnpm.svg"),
+    ("postcss", "file_icons/file_type_postcss.svg"),
+    ("powershell", "file_icons/file_type_powershell.svg"),
+    ("prettier", "file_icons/file_type_prettier.svg"),
+    ("prisma", "file_icons/file_type_prisma.svg"),
+    ("procfile", "file_icons/file_type_procfile.svg"),
+    ("protobuf", "file_icons/file_type_protobuf.svg"),
+    ("python", "file_icons/file_type_python.svg"),
+    ("r", "file_icons/file_type_r.svg"),
+    ("reactjs", "file_icons/file_type_reactjs.svg"),
+    ("reactts", "file_icons/file_type_reactts.svg"),
+    ("rollup", "file_icons/file_type_rollup.svg"),
+    ("ruby", "file_icons/file_type_ruby.svg"),
+    ("rust", "file_icons/file_type_rust.svg"),
+    ("sass", "file_icons/file_type_sass.svg"),
+    ("scala", "file_icons/file_type_scala.svg"),
+    ("shell", "file_icons/file_type_shell.svg"),
+    ("solidity", "file_icons/file_type_solidity.svg"),
+    ("sql", "file_icons/file_type_sql.svg"),
+    ("svelte", "file_icons/file_type_svelte.svg"),
+    ("svg", "file_icons/file_type_svg.svg"),
+    ("swift", "file_icons/file_type_swift.svg"),
+    ("tailwind", "file_icons/file_type_tailwind.svg"),
+    ("terraform", "file_icons/file_type_terraform.svg"),
+    ("text", "file_icons/file_type_text.svg"),
+    ("toml", "file_icons/file_type_toml.svg"),
+    ("turbo", "file_icons/file_type_turbo.svg"),
+    ("typescript", "file_icons/file_type_typescript.svg"),
+    ("typescriptdef", "file_icons/file_type_typescriptdef.svg"),
+    ("vite", "file_icons/file_type_vite.svg"),
+    ("vue", "file_icons/file_type_vue.svg"),
+    ("wasm", "file_icons/file_type_wasm.svg"),
+    ("webpack", "file_icons/file_type_webpack.svg"),
+    ("yaml", "file_icons/file_type_yaml.svg"),
+    ("yarn", "file_icons/file_type_yarn.svg"),
+    ("zig", "file_icons/file_type_zig.svg"),
+    ("zip", "file_icons/file_type_zip.svg"),
 ];
 
 fn stems() -> &'static HashMap<&'static str, &'static str> {
@@ -241,20 +238,17 @@ fn type_for_suffix(suffix: &str) -> Option<&'static str> {
         .copied()
 }
 
-/// Returns the asset path of the icon for a file path, falling back to
-/// Zed's default file icon (`file.svg`). Mirrors Zed's lookup order:
-///
-/// 1. exact file name (`Dockerfile`, `.gitignore` handled below)
-/// 2. progressively dot-stripped name suffixes, so `auth.module.js` tries
-///    `module.js`, then `js`; hidden files try their bare name
-///    (`.gitignore` → `gitignore`), multi-part extensions work too
-///    (`Component.stories.tsx` → `stories.tsx`)
-/// 3. plain extension
-/// 4. `"default"` → `file_icons/file.svg`
+/// Returns the asset path of the official vscode-icons icon for a file path,
+/// falling back to `default_file.svg`.
 pub fn icon_for(path: &Path) -> &'static str {
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-        return "file_icons/file.svg";
+        return "file_icons/default_file.svg";
     };
+
+    // Fast path for .env files (.env, .env.local, .env.example, .env.test, .env.twilio.template, etc.)
+    if name.starts_with(".env") || name.ends_with(".env") {
+        return "file_icons/file_type_dotenv.svg";
+    }
 
     let mut candidate = name;
     loop {
@@ -275,13 +269,53 @@ pub fn icon_for(path: &Path) -> &'static str {
         }
     }
 
-    icon_for_type("default").unwrap_or("file_icons/file.svg")
+    icon_for_type("default").unwrap_or("file_icons/default_file.svg")
 }
 
-pub const FOLDER_COLLAPSED: &str = "file_icons/folder.svg";
-pub const FOLDER_EXPANDED: &str = "file_icons/folder_open.svg";
-pub const CHEVRON_COLLAPSED: &str = "file_icons/chevron_right.svg";
-pub const CHEVRON_EXPANDED: &str = "file_icons/chevron_down.svg";
+pub const FOLDER_COLLAPSED: &str = "file_icons/default_folder.svg";
+pub const FOLDER_EXPANDED: &str = "file_icons/default_folder_opened.svg";
+
+/// Returns a specific icon for special folder names (e.g. `.github`, `.vscode`, `apps`, `docs`),
+/// or the official vscode-icons default folder open/close icon.
+pub fn folder_icon_for(path: &Path, expanded: bool) -> &'static str {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return if expanded { FOLDER_EXPANDED } else { FOLDER_COLLAPSED };
+    };
+    let clean = name.to_lowercase();
+    match clean.as_str() {
+        ".github" => if expanded { "file_icons/folder_type_github_opened.svg" } else { "file_icons/folder_type_github.svg" },
+        ".git" | "git" => if expanded { "file_icons/folder_type_git_opened.svg" } else { "file_icons/folder_type_git.svg" },
+        ".vscode" => if expanded { "file_icons/folder_type_vscode_opened.svg" } else { "file_icons/folder_type_vscode.svg" },
+        ".husky" | "husky" => if expanded { "file_icons/folder_type_husky_opened.svg" } else { "file_icons/folder_type_husky.svg" },
+        ".turbo" | "turbo" => if expanded { "file_icons/folder_type_turbo_opened.svg" } else { "file_icons/folder_type_turbo.svg" },
+        "app" | "apps" => if expanded { "file_icons/folder_type_app_opened.svg" } else { "file_icons/folder_type_app.svg" },
+        "docs" | "doc" | "documentation" => if expanded { "file_icons/folder_type_docs_opened.svg" } else { "file_icons/folder_type_docs.svg" },
+        "src" | "source" | "sources" => if expanded { "file_icons/folder_type_src_opened.svg" } else { "file_icons/folder_type_src.svg" },
+        "package" | "packages" => if expanded { "file_icons/folder_type_package_opened.svg" } else { "file_icons/folder_type_package.svg" },
+        "asset" | "assets" => if expanded { "file_icons/folder_type_asset_opened.svg" } else { "file_icons/folder_type_asset.svg" },
+        "image" | "images" | "img" | "icons" => if expanded { "file_icons/folder_type_images_opened.svg" } else { "file_icons/folder_type_images.svg" },
+        "node_modules" => if expanded { "file_icons/folder_type_node_opened.svg" } else { "file_icons/folder_type_node.svg" },
+        "script" | "scripts" => if expanded { "file_icons/folder_type_script_opened.svg" } else { "file_icons/folder_type_script.svg" },
+        "server" => if expanded { "file_icons/folder_type_server_opened.svg" } else { "file_icons/folder_type_server.svg" },
+        "web" | "www" | "public" => if expanded { "file_icons/folder_type_public_opened.svg" } else { "file_icons/folder_type_public.svg" },
+        "test" | "tests" | "test-results" | "__tests__" | "spec" | "specs" => if expanded { "file_icons/folder_type_test_opened.svg" } else { "file_icons/folder_type_test.svg" },
+        "theme" | "themes" | "style" | "styles" => if expanded { "file_icons/folder_type_theme_opened.svg" } else { "file_icons/folder_type_theme.svg" },
+        "component" | "components" | "ui" => if expanded { "file_icons/folder_type_component_opened.svg" } else { "file_icons/folder_type_component.svg" },
+        "api" | "apis" => if expanded { "file_icons/folder_type_api_opened.svg" } else { "file_icons/folder_type_api.svg" },
+        "mobile" => if expanded { "file_icons/folder_type_mobile_opened.svg" } else { "file_icons/folder_type_mobile.svg" },
+        "config" | "configs" | ".config" => if expanded { "file_icons/folder_type_config_opened.svg" } else { "file_icons/folder_type_config.svg" },
+        "tools" | "utils" | "util" | "helpers" | "migration" | "migrations" => if expanded { "file_icons/folder_type_tools_opened.svg" } else { "file_icons/folder_type_tools.svg" },
+        "view" | "views" | "pages" => if expanded { "file_icons/folder_type_view_opened.svg" } else { "file_icons/folder_type_view.svg" },
+        "controller" | "controllers" => if expanded { "file_icons/folder_type_controller_opened.svg" } else { "file_icons/folder_type_controller.svg" },
+        "model" | "models" => if expanded { "file_icons/folder_type_model_opened.svg" } else { "file_icons/folder_type_model.svg" },
+        "middleware" | "middlewares" => if expanded { "file_icons/folder_type_middleware_opened.svg" } else { "file_icons/folder_type_middleware.svg" },
+        "docker" | ".docker" => if expanded { "file_icons/folder_type_docker_opened.svg" } else { "file_icons/folder_type_docker.svg" },
+        "font" | "fonts" => if expanded { "file_icons/folder_type_fonts_opened.svg" } else { "file_icons/folder_type_fonts.svg" },
+        "plugin" | "plugins" => if expanded { "file_icons/folder_type_plugin_opened.svg" } else { "file_icons/folder_type_plugin.svg" },
+        "dist" | "build" | "out" | "target" | ".next" => if expanded { "file_icons/folder_type_dist_opened.svg" } else { "file_icons/folder_type_dist.svg" },
+        _ => if expanded { FOLDER_EXPANDED } else { FOLDER_COLLAPSED },
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -293,38 +327,96 @@ mod tests {
 
     #[test]
     fn by_extension() {
-        assert_eq!(icon("main.rs"), "file_icons/rust.svg");
-        assert_eq!(icon("index.js"), "file_icons/javascript.svg");
-        assert_eq!(icon("App.tsx"), "file_icons/react.svg");
-        assert_eq!(icon("style.scss"), "file_icons/sass.svg");
-        assert_eq!(icon("data.csv"), "file_icons/database.svg");
+        assert_eq!(icon("main.rs"), "file_icons/file_type_rust.svg");
+        assert_eq!(icon("index.js"), "file_icons/file_type_js.svg");
+        assert_eq!(icon("App.tsx"), "file_icons/file_type_reactts.svg");
+        assert_eq!(icon("style.scss"), "file_icons/file_type_sass.svg");
+        assert_eq!(icon("data.sql"), "file_icons/file_type_sql.svg");
+        assert_eq!(icon("styled.d.ts"), "file_icons/file_type_typescriptdef.svg");
     }
 
     #[test]
     fn by_file_name() {
-        assert_eq!(icon("Dockerfile"), "file_icons/docker.svg");
-        assert_eq!(icon("Cargo.toml"), "file_icons/toml.svg");
+        assert_eq!(icon("Dockerfile"), "file_icons/file_type_docker.svg");
+        assert_eq!(icon("Cargo.toml"), "file_icons/file_type_cargo.svg");
+        assert_eq!(icon("package.json"), "file_icons/file_type_npm.svg");
+    }
+
+    #[test]
+    fn env_files() {
+        assert_eq!(icon(".env"), "file_icons/file_type_dotenv.svg");
+        assert_eq!(icon(".env.local"), "file_icons/file_type_dotenv.svg");
+        assert_eq!(icon(".env.example"), "file_icons/file_type_dotenv.svg");
+        assert_eq!(icon(".env.test"), "file_icons/file_type_dotenv.svg");
+        assert_eq!(icon(".env.twilio.template"), "file_icons/file_type_dotenv.svg");
+    }
+
+    #[test]
+    fn config_files() {
+        assert_eq!(icon("drizzle.config.ts"), "file_icons/file_type_typescript.svg");
+        assert_eq!(icon("playwright.config.ts"), "file_icons/file_type_typescript.svg");
+        assert_eq!(icon("commitlint.config.js"), "file_icons/file_type_js.svg");
+        assert_eq!(icon("jest.config.js"), "file_icons/file_type_js.svg");
     }
 
     #[test]
     fn hidden_files() {
-        assert_eq!(icon(".gitignore"), "file_icons/git.svg");
-        assert_eq!(icon(".zshrc"), "file_icons/terminal.svg");
+        assert_eq!(icon(".gitignore"), "file_icons/file_type_git.svg");
+        assert_eq!(icon(".editorconfig"), "file_icons/file_type_editorconfig.svg");
+        assert_eq!(icon(".dockerignore"), "file_icons/file_type_docker.svg");
+        assert_eq!(icon(".npmrc"), "file_icons/file_type_npm.svg");
+        assert_eq!(icon(".prettierignore"), "file_icons/file_type_prettier.svg");
     }
 
     #[test]
     fn multipart_names() {
-        assert_eq!(icon("auth.module.js"), "file_icons/javascript.svg");
-        assert_eq!(icon("Button.stories.tsx"), "file_icons/react.svg");
+        assert_eq!(icon("auth.module.js"), "file_icons/file_type_js.svg");
+        assert_eq!(icon("Button.stories.tsx"), "file_icons/file_type_reactts.svg");
         assert_eq!(
             icon("eslint.config.mjs"),
-            "file_icons/eslint.svg",
+            "file_icons/file_type_eslint.svg",
             "full-name suffix beats plain extension"
         );
     }
 
     #[test]
     fn fallback_default() {
-        assert_eq!(icon("unknown.xyz"), "file_icons/file.svg");
+        assert_eq!(icon("unknown.xyz"), "file_icons/default_file.svg");
+    }
+
+    #[test]
+    fn all_folder_icons_exist_in_assets() {
+        use crate::assets::AppAssets;
+        let test_folders = [
+            ".github", ".git", ".vscode", ".husky", ".turbo", "app", "apps",
+            "docs", "src", "package", "assets", "images", "node_modules",
+            "scripts", "server", "web", "public", "tests", "theme", "components",
+            "api", "mobile", "config", "tools", "utils", "migrations",
+            "views", "controllers", "models", "middleware", "docker", "fonts",
+            "plugins", "dist", ".next", "unknown_folder"
+        ];
+        for f in test_folders {
+            let closed = folder_icon_for(Path::new(f), false);
+            let opened = folder_icon_for(Path::new(f), true);
+            assert!(
+                AppAssets::get(closed).is_some(),
+                "Missing closed folder asset: {closed} for {f}"
+            );
+            assert!(
+                AppAssets::get(opened).is_some(),
+                "Missing opened folder asset: {opened} for {f}"
+            );
+        }
+    }
+
+    #[test]
+    fn all_type_icons_exist_in_assets() {
+        use crate::assets::AppAssets;
+        for (ty, path) in TYPE_ICONS {
+            assert!(
+                AppAssets::get(path).is_some(),
+                "Missing TYPE_ICON asset: {path} for {ty}"
+            );
+        }
     }
 }

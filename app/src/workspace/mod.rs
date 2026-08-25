@@ -35,6 +35,19 @@ impl Activity {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CreatingKind {
+    File,
+    Folder,
+}
+
+#[derive(Clone)]
+pub(crate) struct InlineCreating {
+    pub(crate) kind: CreatingKind,
+    pub(crate) parent_dir: PathBuf,
+    pub(crate) input: Entity<InputState>,
+}
+
 pub(crate) struct Workspace {
     /// None until the user opens a folder (VS Code-style start state).
     pub(crate) root: Option<PathBuf>,
@@ -42,6 +55,8 @@ pub(crate) struct Workspace {
     pub(crate) open: Option<PathBuf>,
     pub(crate) selected_path: Option<PathBuf>,
     pub(crate) explorer_section_expanded: bool,
+    pub(crate) inline_creating: Option<InlineCreating>,
+    pub(crate) pending_open: Option<PathBuf>,
     /// Buffer was created via "New File" and has no path yet.
     pub(crate) untitled: bool,
     pub(crate) dirty: bool,
@@ -85,6 +100,8 @@ impl Workspace {
             open: None,
             selected_path: None,
             explorer_section_expanded: true,
+            inline_creating: None,
+            pending_open: None,
             untitled: false,
             dirty: false,
             status: "Welcome — open a folder or create a file to begin".into(),
@@ -153,6 +170,7 @@ impl Workspace {
         self.tree = load_dir(&path);
         self.explorer_section_expanded = true;
         self.selected_path = None;
+        self.inline_creating = None;
         self.status = format!("Opened folder {}", display_name(&path));
         cx.notify();
     }
@@ -336,8 +354,9 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(crate) fn new_file_in_dir(
+    pub(crate) fn start_inline_create(
         &mut self,
+        kind: CreatingKind,
         parent: Option<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -355,61 +374,99 @@ impl Workspace {
             .or_else(|| self.root.clone());
 
         let Some(dir) = target_dir else {
-            self.new_file(window, cx);
+            if kind == CreatingKind::File {
+                self.new_file(window, cx);
+            }
             return;
         };
 
-        let mut candidate = dir.join("untitled.txt");
-        let mut counter = 1;
-        while candidate.exists() {
-            candidate = dir.join(format!("untitled_{counter}.txt"));
-            counter += 1;
-        }
-
-        if let Ok(()) = std::fs::write(&candidate, b"") {
-            if let Some(root) = &self.root {
-                self.tree = reload_dir_preserving(root, &self.tree);
+        // Expand parent directory so the new item is visible in the tree
+        if Some(&dir) != self.root.as_ref() {
+            fn expand_path(nodes: &mut [TreeNode], target: &Path) {
+                for n in nodes {
+                    if target.starts_with(&n.path) {
+                        n.expanded = true;
+                        if n.children.is_empty() {
+                            n.children = load_dir(&n.path);
+                        }
+                        expand_path(&mut n.children, target);
+                    }
+                }
             }
-            self.open_file(candidate.clone(), window, cx);
-            self.status = format!("Created {}", display_name(&candidate));
-            cx.notify();
+            expand_path(&mut self.tree, &dir);
         }
+        self.explorer_section_expanded = true;
+
+        let input = cx.new(|cx| {
+            let state = InputState::new(window, cx);
+            state.focus(window, cx);
+            state
+        });
+
+        cx.subscribe(&input, |this, _state, event: &InputEvent, cx| {
+            match event {
+                InputEvent::PressEnter { .. } => {
+                    this.confirm_inline_create(cx);
+                }
+                InputEvent::Blur => {
+                    this.cancel_inline_create(cx);
+                }
+                _ => {}
+            }
+        })
+        .detach();
+
+        self.inline_creating = Some(InlineCreating {
+            kind,
+            parent_dir: dir,
+            input,
+        });
+        cx.notify();
     }
 
-    pub(crate) fn new_folder_in_dir(
-        &mut self,
-        parent: Option<PathBuf>,
-        cx: &mut Context<Self>,
-    ) {
-        let target_dir = parent
-            .or_else(|| {
-                self.selected_path.as_ref().map(|p| {
-                    if p.is_dir() {
-                        p.clone()
-                    } else {
-                        p.parent().unwrap_or(p).to_path_buf()
-                    }
-                })
-            })
-            .or_else(|| self.root.clone());
-
-        let Some(dir) = target_dir else {
+    pub(crate) fn confirm_inline_create(&mut self, cx: &mut Context<Self>) {
+        let Some(creating) = self.inline_creating.take() else {
             return;
         };
-
-        let mut candidate = dir.join("new_folder");
-        let mut counter = 1;
-        while candidate.exists() {
-            candidate = dir.join(format!("new_folder_{counter}"));
-            counter += 1;
+        let raw_name = creating.input.read(cx).value().to_string();
+        let name = raw_name.trim();
+        if name.is_empty() {
+            cx.notify();
+            return;
         }
 
-        if let Ok(()) = std::fs::create_dir_all(&candidate) {
-            if let Some(root) = &self.root {
-                self.tree = reload_dir_preserving(root, &self.tree);
+        let target_path = creating.parent_dir.join(name);
+
+        match creating.kind {
+            CreatingKind::File => {
+                if let Some(parent) = target_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if let Ok(()) = std::fs::write(&target_path, b"") {
+                    if let Some(root) = &self.root {
+                        self.tree = reload_dir_preserving(root, &self.tree);
+                    }
+                    self.selected_path = Some(target_path.clone());
+                    self.pending_open = Some(target_path.clone());
+                    self.status = format!("Created {}", display_name(&target_path));
+                }
             }
-            self.selected_path = Some(candidate.clone());
-            self.status = format!("Created folder {}", display_name(&candidate));
+            CreatingKind::Folder => {
+                if let Ok(()) = std::fs::create_dir_all(&target_path) {
+                    if let Some(root) = &self.root {
+                        self.tree = reload_dir_preserving(root, &self.tree);
+                    }
+                    self.selected_path = Some(target_path.clone());
+                    self.status = format!("Created folder {}", display_name(&target_path));
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_inline_create(&mut self, cx: &mut Context<Self>) {
+        if self.inline_creating.is_some() {
+            self.inline_creating = None;
             cx.notify();
         }
     }

@@ -32,7 +32,7 @@ pub(crate) fn render_status_bar(status: &str, theme_name: &str, t: &Colors) -> i
                 .gap(px(12.0))
                 .child(
                     svg()
-                        .path("ui_icons/settings.svg")
+                        .path("ui_icons/settings-gear_tint.svg")
                         .w(px(13.0))
                         .h(px(13.0))
                         .text_color(rgba(t.text)),

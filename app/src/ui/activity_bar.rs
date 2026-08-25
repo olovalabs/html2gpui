@@ -1,5 +1,5 @@
 //! VS Code-style activity bar: the 48px icon rail on the far left that
-//! switches the active sidebar panel.
+//! switches the active sidebar panel using official VS Code Codicons.
 
 use gpui::{div, prelude::*, px, rgba, svg, Context, IntoElement, SharedString, Window};
 
@@ -28,7 +28,7 @@ pub(crate) fn render_activity_bar(
                 .flex_col()
                 .child(activity_icon(
                     "act-explorer",
-                    "ui_icons/file_tree.svg",
+                    "ui_icons/files_tint.svg",
                     show_sidebar && activity == Activity::Explorer,
                     Activity::Explorer,
                     t,
@@ -36,7 +36,7 @@ pub(crate) fn render_activity_bar(
                 ))
                 .child(activity_icon(
                     "act-search",
-                    "ui_icons/magnifying_glass.svg",
+                    "ui_icons/search_tint.svg",
                     show_sidebar && activity == Activity::Search,
                     Activity::Search,
                     t,
@@ -44,7 +44,7 @@ pub(crate) fn render_activity_bar(
                 ))
                 .child(activity_icon(
                     "act-git",
-                    "ui_icons/git_branch.svg",
+                    "ui_icons/source-control_tint.svg",
                     show_sidebar && activity == Activity::Git,
                     Activity::Git,
                     t,
@@ -52,7 +52,7 @@ pub(crate) fn render_activity_bar(
                 ))
                 .child(activity_icon(
                     "act-ext",
-                    "ui_icons/blocks.svg",
+                    "ui_icons/extensions_tint.svg",
                     show_sidebar && activity == Activity::Extensions,
                     Activity::Extensions,
                     t,
@@ -62,7 +62,7 @@ pub(crate) fn render_activity_bar(
         .child(
             div().w_full().flex().flex_col().child(activity_static_icon(
                 "act-settings",
-                "ui_icons/settings.svg",
+                "ui_icons/settings-gear_tint.svg",
                 t,
                 move |this, _, window, cx| {
                     // Settings cycles to the next theme for now.
@@ -82,6 +82,12 @@ fn activity_icon(
     t: &crate::theme::Colors,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
+    let icon_color = if selected {
+        0xffffffff
+    } else {
+        0x858585ff
+    };
+
     div()
         .id(SharedString::from(id))
         .w_full()
@@ -92,22 +98,21 @@ fn activity_icon(
         .relative()
         .cursor_pointer()
         .hover(|s| s.bg(rgba(t.ghost_hover)))
-        .when(selected, |d| d.bg(rgba(t.ghost_active)))
         .child(
             div()
                 .absolute()
                 .left(px(0.0))
-                .top(px(6.0))
-                .h(px(36.0))
+                .top(px(0.0))
+                .bottom(px(0.0))
                 .w(px(2.0))
-                .bg(rgba(if selected { t.icon_accent } else { t.panel })),
+                .bg(rgba(if selected { 0xffffffff } else { 0x00000000 })),
         )
         .child(
             svg()
                 .path(svg_path)
-                .w(px(22.0))
-                .h(px(22.0))
-                .text_color(rgba(if selected { t.icon_accent } else { t.icon_muted })),
+                .w(px(24.0))
+                .h(px(24.0))
+                .text_color(rgba(icon_color)),
         )
         .on_click(cx.listener(move |this, _, _, cx| this.toggle_activity(which, cx)))
 }
@@ -127,8 +132,8 @@ fn activity_static_icon(
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .text_color(rgba(t.icon_muted))
-        .hover(|s| s.bg(rgba(t.ghost_hover)).text_color(rgba(t.text)))
-        .child(svg().path(svg_path).w(px(22.0)).h(px(22.0)))
+        .text_color(rgba(0x858585ff))
+        .hover(|s| s.bg(rgba(t.ghost_hover)).text_color(rgba(0xffffffff)))
+        .child(svg().path(svg_path).w(px(24.0)).h(px(24.0)))
         .on_click(cx.listener(action))
 }

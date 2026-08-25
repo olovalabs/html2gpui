@@ -9,11 +9,16 @@ use crate::actions::*;
 use crate::assets::SANS_FONT;
 use crate::fs_tree::display_name;
 use crate::ui;
+use crate::workspace::CreatingKind;
 
 use super::{Activity, Workspace};
 
 impl Render for Workspace {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(path) = self.pending_open.take() {
+            self.open_file(path, window, cx);
+        }
+
         let th = self.theme();
         let t = th.colors;
         let welcome = self.welcome_visible();
@@ -22,6 +27,7 @@ impl Render for Workspace {
         let open = self.open.clone();
         let selected_path = self.selected_path.clone();
         let explorer_section_expanded = self.explorer_section_expanded;
+        let inline_creating = self.inline_creating.clone();
         let status = self.status.clone();
         let editor = self.editor.clone();
         let activity = self.activity;
@@ -86,10 +92,10 @@ impl Render for Workspace {
                 this.collapse_all_folders(cx);
             }))
             .on_action(cx.listener(|this, action: &ExplorerNewFile, window, cx| {
-                this.new_file_in_dir(action.parent.clone(), window, cx);
+                this.start_inline_create(CreatingKind::File, action.parent.clone(), window, cx);
             }))
-            .on_action(cx.listener(|this, action: &ExplorerNewFolder, _, cx| {
-                this.new_folder_in_dir(action.parent.clone(), cx);
+            .on_action(cx.listener(|this, action: &ExplorerNewFolder, window, cx| {
+                this.start_inline_create(CreatingKind::Folder, action.parent.clone(), window, cx);
             }))
             .on_action(cx.listener(|this, action: &ExplorerRevealInFinder, _, cx| {
                 this.reveal_in_explorer(&action.path, cx);
@@ -122,9 +128,11 @@ impl Render for Workspace {
                             Activity::Explorer => match &root_opt {
                                 Some(root) => ui::sidebar::explorer::render_tree(
                                     tree,
+                                    Some(root.as_path()),
                                     open.as_ref(),
                                     selected_path.as_ref(),
                                     explorer_section_expanded,
+                                    inline_creating.as_ref(),
                                     &display_name(root),
                                     &t,
                                     cx,
