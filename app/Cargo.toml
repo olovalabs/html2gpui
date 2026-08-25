@@ -4,8 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-gpui = "0.2"
-html2gpui = { path = "../compiler" }
-
-[build-dependencies]
-html2gpui = { path = "../compiler" }
+gpui = "0.2.2"
+gpui-component = { version = "0.5.1", features = ["tree-sitter-languages"] }
+gpui-component-assets = "0.5.1"

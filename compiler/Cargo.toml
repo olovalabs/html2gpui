@@ -1,9 +1,0 @@
-[package]
-name = "html2gpui"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-scraper = "0.20"
-ego-tree = "0.6"
-regex = "1"
