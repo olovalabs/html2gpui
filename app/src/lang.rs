@@ -80,15 +80,35 @@ pub fn lsp_status(path: &Path) -> String {
 }
 
 fn binary_on_path(binary: &str) -> bool {
-    let exe = if cfg!(windows) && !binary.ends_with(".exe") {
-        format!("{binary}.exe")
+    // Windows executables come in several flavors; npm global installs
+    // create .cmd shims (never .exe), so all of them must be probed.
+    const WINDOWS_EXTS: [&str; 3] = [".exe", ".cmd", ".bat"];
+    let candidates: Vec<String> = if cfg!(windows) && !WINDOWS_EXTS.iter().any(|e| binary.ends_with(e))
+    {
+        WINDOWS_EXTS.iter().map(|e| format!("{binary}{e}")).collect()
     } else {
-        binary.to_string()
+        vec![binary.to_string()]
     };
     std::env::var_os("PATH")
         .map(|paths| {
-            std::env::split_paths(&paths)
-                .any(|dir| dir.join(binary).is_file() || dir.join(&exe).is_file())
+            std::env::split_paths(&paths).any(|dir| {
+                candidates
+                    .iter()
+                    .any(|name| dir.join(name).is_file())
+            })
         })
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_binaries_on_path() {
+        // A shell is present on every dev machine.
+        let shell = if cfg!(windows) { "cmd" } else { "sh" };
+        assert!(binary_on_path(shell));
+        assert!(!binary_on_path("definitely-not-a-binary-xyz"));
+    }
 }
