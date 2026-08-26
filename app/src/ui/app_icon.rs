@@ -57,6 +57,7 @@ pub fn render_app_icon(size: f32, t: &Colors) -> AnyElement {
 }
 
 /// Render the app icon next to a title — for use in headers/badges.
+#[allow(dead_code)]
 pub fn render_app_icon_with_label(
     size: f32,
     title: &str,

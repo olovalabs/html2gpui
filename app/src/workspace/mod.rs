@@ -5,13 +5,14 @@
 mod render;
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use gpui::{AppContext, Context, Entity, Window};
 use gpui_component::input::{InputEvent, InputState, TabSize};
 
 use crate::fs_tree::{collapse_all, display_name, load_dir, reload_dir_preserving, TreeNode};
 use crate::lang;
+use crate::lsp::{LspEvent, LspManager};
 use crate::theme;
 
 /// Represents a single open tab with its own editor buffer
@@ -78,6 +79,8 @@ pub(crate) struct Workspace {
     pub(crate) theme_ix: usize,
     /// Editor buffer font size in pixels (supports Ctrl++/Ctrl-- zoom like Zed)
     pub(crate) font_size: f32,
+    /// Language Server Protocol client manager
+    pub(crate) lsp: Arc<Mutex<LspManager>>,
     /// Open tabs
     pub(crate) tabs: Vec<OpenTab>,
     /// Index of the currently active tab
@@ -85,8 +88,32 @@ pub(crate) struct Workspace {
 }
 
 impl Workspace {
-    pub(crate) fn new(_window: &mut Window, _cx: &mut Context<Self>) -> Self {
-        // Don't create any tabs on startup - only when files are opened
+    pub(crate) fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let lsp_mgr = LspManager::new();
+        let rx = lsp_mgr.event_receiver();
+        let lsp = Arc::new(Mutex::new(lsp_mgr));
+
+        cx.spawn({
+            let rx = rx.clone();
+            async move |this, cx| {
+                while let Ok(event) = rx.recv().await {
+                    match event {
+                        LspEvent::Diagnostics { path, diagnostics } => {
+                            let _ = this.update(cx, |workspace, cx| {
+                                workspace.apply_diagnostics(&path, diagnostics, cx);
+                            });
+                        }
+                        LspEvent::Status { lang, message } => {
+                            let _ = this.update(cx, |workspace, cx| {
+                                workspace.status = format!("{lang}: {message}");
+                                cx.notify();
+                            });
+                        }
+                    }
+                }
+            }
+        })
+        .detach();
 
         // Start with NO project loaded — the welcome screen offers
         // Open Folder / Open File / New File (VS Code-style).
@@ -103,6 +130,7 @@ impl Workspace {
             show_terminal: false,
             theme_ix: theme::default_index(),
             font_size: 14.5,
+            lsp,
             tabs: Vec::new(),
             active_tab: 0,
         }
@@ -324,11 +352,23 @@ impl Workspace {
                             tab_size: 4,
                             hard_tabs: false,
                         });
-                    state.set_value(text, window, cx);
+                    state.set_value(text.clone(), window, cx);
                     state
                 });
 
+                // Notify LSP of document open
+                let root_path = self.root.clone();
+                self.lsp
+                    .lock()
+                    .unwrap()
+                    .open_document(&path, lang_id, &text, root_path.as_deref());
+
                 // Subscribe to change events - also handles promoting preview to permanent
+                let lsp_clone = self.lsp.clone();
+                let path_clone = path.clone();
+                let lang_str = lang_id.to_string();
+                let editor_ent = editor.clone();
+
                 cx.subscribe(&editor, move |this, _state, event: &InputEvent, cx| {
                     if matches!(event, InputEvent::Change) {
                         if let Some(tab) = this.tabs.get_mut(this.active_tab) {
@@ -339,6 +379,11 @@ impl Workspace {
                             if tab.preview {
                                 tab.preview = false;
                             }
+                            let text = editor_ent.read(cx).value().to_string();
+                            lsp_clone
+                                .lock()
+                                .unwrap()
+                                .change_document(&path_clone, &lang_str, &text);
                             cx.notify();
                         }
                     }
@@ -705,6 +750,33 @@ impl Workspace {
         cx.notify();
     }
 
+    pub(crate) fn apply_diagnostics(
+        &mut self,
+        path: &Path,
+        diagnostics: Vec<lsp_types::Diagnostic>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut updated = false;
+        for tab in &mut self.tabs {
+            if let Some(tab_path) = &tab.path {
+                if crate::lsp::paths_match(tab_path, path) {
+                    tab.editor.update(cx, |state, _cx| {
+                        if let Some(diag_set) = state.diagnostics_mut() {
+                            diag_set.clear();
+                            for d in &diagnostics {
+                                diag_set.push(d.clone());
+                            }
+                            updated = true;
+                        }
+                    });
+                }
+            }
+        }
+        if updated {
+            cx.notify();
+        }
+    }
+
     // Tab management methods
 
     /// Switch to a specific tab by index
@@ -717,6 +789,14 @@ impl Workspace {
 
     /// Close a tab by index
     pub(crate) fn close_tab(&mut self, index: usize, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(closed_tab) = self.tabs.get(index) {
+            if let Some(p) = &closed_tab.path {
+                if let Some(lang_id) = lang::language_for(p) {
+                    self.lsp.lock().unwrap().close_document(p, lang_id);
+                }
+            }
+        }
+
         // Don't close if only one tab and it's clean (just show welcome)
         if self.tabs.len() == 1 {
             self.tabs.remove(0);
@@ -754,6 +834,14 @@ impl Workspace {
     /// Close a tab at a specific index (called from tab close button click)
     pub(crate) fn close_tab_at_index(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < self.tabs.len() {
+            if let Some(closed_tab) = self.tabs.get(index) {
+                if let Some(p) = &closed_tab.path {
+                    if let Some(lang_id) = lang::language_for(p) {
+                        self.lsp.lock().unwrap().close_document(p, lang_id);
+                    }
+                }
+            }
+
             // Don't close if only one tab - just show welcome
             if self.tabs.len() == 1 {
                 self.tabs.remove(0);

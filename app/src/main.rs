@@ -9,6 +9,7 @@ mod assets;
 mod file_icons;
 mod fs_tree;
 mod lang;
+mod lsp;
 mod theme;
 mod ui;
 mod workspace;
