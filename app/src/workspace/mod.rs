@@ -14,6 +14,19 @@ use crate::fs_tree::{collapse_all, display_name, load_dir, reload_dir_preserving
 use crate::lang;
 use crate::theme;
 
+/// Represents a single open tab with its own editor buffer
+#[derive(Clone)]
+pub struct OpenTab {
+    pub path: Option<PathBuf>,
+    pub editor: Entity<InputState>,
+    pub dirty: bool,
+    pub untitled: bool,
+    /// True if this is a preview tab (will be replaced when opening another file)
+    /// VS Code behavior: clicking a file opens it in preview mode,
+    /// editing promotes it to a permanent tab
+    pub preview: bool,
+}
+
 /// Which sidebar panel is active.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Activity {
@@ -52,64 +65,43 @@ pub(crate) struct Workspace {
     /// None until the user opens a folder (VS Code-style start state).
     pub(crate) root: Option<PathBuf>,
     pub(crate) tree: Vec<TreeNode>,
-    pub(crate) open: Option<PathBuf>,
+    /// Currently selected path in the explorer.
     pub(crate) selected_path: Option<PathBuf>,
     pub(crate) explorer_section_expanded: bool,
     pub(crate) inline_creating: Option<InlineCreating>,
+    /// A file to open once the next render cycle runs.
     pub(crate) pending_open: Option<PathBuf>,
-    /// Buffer was created via "New File" and has no path yet.
-    pub(crate) untitled: bool,
-    pub(crate) dirty: bool,
     pub(crate) status: String,
     pub(crate) activity: Activity,
     pub(crate) show_sidebar: bool,
     pub(crate) show_terminal: bool,
     pub(crate) theme_ix: usize,
-    pub(crate) editor: Entity<InputState>,
+    /// Open tabs
+    pub(crate) tabs: Vec<OpenTab>,
+    /// Index of the currently active tab
+    pub(crate) active_tab: usize,
 }
 
 impl Workspace {
-    pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let editor = cx.new(|cx| {
-            InputState::new(window, cx)
-                .code_editor("text")
-                .line_number(true)
-                .indent_guides(false)
-                .soft_wrap(false)
-                .searchable(true)
-                .tab_size(TabSize {
-                    tab_size: 4,
-                    hard_tabs: false,
-                })
-                .placeholder("Open a file from the explorer")
-        });
-
-        cx.subscribe(&editor, |this, _state, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) && this.open.is_some() && !this.dirty {
-                this.dirty = true;
-                cx.notify();
-            }
-        })
-        .detach();
+    pub(crate) fn new(_window: &mut Window, _cx: &mut Context<Self>) -> Self {
+        // Don't create any tabs on startup - only when files are opened
 
         // Start with NO project loaded — the welcome screen offers
         // Open Folder / Open File / New File (VS Code-style).
         Self {
             root: None,
             tree: Vec::new(),
-            open: None,
             selected_path: None,
             explorer_section_expanded: true,
             inline_creating: None,
             pending_open: None,
-            untitled: false,
-            dirty: false,
             status: "Welcome — open a folder or create a file to begin".into(),
             activity: Activity::Explorer,
             show_sidebar: true,
             show_terminal: false,
             theme_ix: theme::default_index(),
-            editor,
+            tabs: Vec::new(),
+            active_tab: 0,
         }
     }
 
@@ -120,26 +112,45 @@ impl Workspace {
 
     /// Window/title-bar text: "file ● — folder", "folder" or the app name.
     pub(crate) fn title(&self) -> String {
-        match (&self.open, &self.root) {
-            (Some(p), _) => {
-                let star = if self.dirty { " ●" } else { "" };
-                let name = display_name(p);
-                match self.root.as_deref().map(display_name) {
-                    Some(folder) => format!("{name}{star} — {folder}"),
+        if let Some(tab) = self.tabs.get(self.active_tab) {
+            if let Some(path) = &tab.path {
+                let star = if tab.dirty { " ●" } else { "" };
+                let name = display_name(path);
+                match &self.root {
+                    Some(root) => format!("{name}{star} — {}", display_name(root)),
                     None => format!("{name}{star}"),
                 }
-            }
-            (_, Some(r)) => display_name(r),
-            _ if self.untitled => {
-                let star = if self.dirty { " ●" } else { "" };
+            } else if tab.untitled {
+                let star = if tab.dirty { " ●" } else { "" };
                 format!("untitled{star} — gpui editor")
+            } else {
+                "gpui editor".to_string()
             }
-            _ => "gpui editor".to_string(),
+        } else {
+            "gpui editor".to_string()
         }
     }
 
+    /// Returns true if welcome screen should be shown
     pub(crate) fn welcome_visible(&self) -> bool {
-        self.open.is_none() && !self.untitled && self.root.is_none()
+        // Show welcome when no files are open
+        self.tabs.is_empty()
+    }
+
+    /// Get the active tab's editor
+    pub fn active_editor(&self) -> Option<&Entity<InputState>> {
+        self.tabs.get(self.active_tab).map(|t| &t.editor)
+    }
+
+    /// Get the active tab's file path
+    pub fn active_path(&self) -> Option<&PathBuf> {
+        self.tabs.get(self.active_tab)?.path.as_ref()
+    }
+
+    /// Check if active tab has unsaved changes
+    #[allow(dead_code)]
+    pub fn is_dirty(&self) -> bool {
+        self.tabs.get(self.active_tab).map(|t| t.dirty).unwrap_or(false)
     }
 
     // -- commands -----------------------------------------------------------
@@ -188,13 +199,42 @@ impl Workspace {
     }
 
     pub(crate) fn new_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.editor.update(cx, |state, cx| {
-            state.set_highlighter("text", cx);
-            state.set_value("", window, cx);
+        // Create a new untitled tab
+        let editor = cx.new(|cx| {
+            InputState::new(window, cx)
+                .code_editor("text")
+                .line_number(true)
+                .indent_guides(false)
+                .soft_wrap(false)
+                .searchable(true)
+                .tab_size(TabSize {
+                    tab_size: 4,
+                    hard_tabs: false,
+                })
+                .placeholder("Start typing...")
         });
-        self.open = None;
-        self.untitled = true;
-        self.dirty = false;
+
+        // Subscribe to change events for the new editor
+        cx.subscribe(&editor, move |this, _state, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                if let Some(tab) = this.tabs.get_mut(this.active_tab) {
+                    if !tab.dirty {
+                        tab.dirty = true;
+                        cx.notify();
+                    }
+                }
+            }
+        })
+        .detach();
+
+        self.tabs.push(OpenTab {
+            path: None,
+            editor,
+            dirty: false,
+            untitled: true,
+            preview: false, // New file tabs are permanent
+        });
+        self.active_tab = self.tabs.len() - 1;
         self.status = "Untitled file — Ctrl+S to save".into();
         cx.notify();
     }
@@ -224,6 +264,30 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.selected_path = Some(path.clone());
+
+        // Check if file is already open in a tab
+        if let Some(idx) = self.tabs.iter().position(|t| t.path.as_ref() == Some(&path)) {
+            // File already open - switch to its tab and promote preview to permanent
+            self.active_tab = idx;
+            // Remove preview status - it's now a permanent tab
+            if let Some(tab) = self.tabs.get_mut(idx) {
+                tab.preview = false;
+            }
+            cx.notify();
+            return;
+        }
+
+        // VS Code behavior: Check if current active tab is a preview tab
+        // If yes, REPLACE it with the new file (don't add a new tab)
+        // If no, ADD a new tab
+        let replace_preview = if let Some(active_idx) = self.tabs.get(self.active_tab) {
+            // Active tab is preview AND not dirty AND is the only tab or current view
+            active_idx.preview && !active_idx.dirty
+        } else {
+            false
+        };
+
+        // Read file content
         match std::fs::read(&path) {
             Ok(bytes) => {
                 if bytes.len() > 8_000_000 {
@@ -244,14 +308,60 @@ impl Workspace {
                     "text"
                 };
                 let text = String::from_utf8_lossy(&bytes).into_owned();
-                self.editor.update(cx, |state, cx| {
-                    state.set_indent_guides(false, window, cx);
-                    state.set_highlighter(lang_id, cx);
+
+                // Create a new editor for this tab
+                let editor = cx.new(|cx| {
+                    let mut state = InputState::new(window, cx)
+                        .code_editor(lang_id)
+                        .line_number(true)
+                        .indent_guides(false)
+                        .soft_wrap(false)
+                        .searchable(true)
+                        .tab_size(TabSize {
+                            tab_size: 4,
+                            hard_tabs: false,
+                        });
                     state.set_value(text, window, cx);
+                    state
                 });
-                self.open = Some(path.clone());
-                self.untitled = false;
-                self.dirty = false;
+
+                // Subscribe to change events - also handles promoting preview to permanent
+                cx.subscribe(&editor, move |this, _state, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        if let Some(tab) = this.tabs.get_mut(this.active_tab) {
+                            if !tab.dirty {
+                                tab.dirty = true;
+                            }
+                            // VS Code: editing a preview tab promotes it to permanent
+                            if tab.preview {
+                                tab.preview = false;
+                            }
+                            cx.notify();
+                        }
+                    }
+                })
+                .detach();
+
+                if replace_preview {
+                    // REPLACE the current preview tab with the new file
+                    if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                        tab.path = Some(path.clone());
+                        tab.dirty = false;
+                        tab.untitled = false;
+                        tab.preview = true; // New file is still in preview mode
+                        tab.editor = editor;
+                    }
+                } else {
+                    // ADD a new tab in preview mode (VS Code style)
+                    self.tabs.push(OpenTab {
+                        path: Some(path.clone()),
+                        editor,
+                        dirty: false,
+                        untitled: false,
+                        preview: true, // New tabs start as preview
+                    });
+                    self.active_tab = self.tabs.len() - 1;
+                }
                 self.status = if highlight {
                     format!("{} · {}", path.display(), lang::lsp_status(&path))
                 } else {
@@ -264,21 +374,28 @@ impl Workspace {
     }
 
     pub(crate) fn save(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        // Untitled buffer → fall back to Save As.
-        if self.open.is_none() {
-            if !self.untitled {
+        // Get active tab
+        let tab = match self.active_tab_mut() {
+            Some(t) => t,
+            None => {
                 self.status = "No file open".into();
                 cx.notify();
                 return;
             }
+        };
+
+        // If untitled, fall back to Save As
+        if tab.path.is_none() {
             self.save_as(cx);
             return;
         }
-        let path = self.open.clone().unwrap();
-        let text = self.editor.read(cx).value().to_string();
+
+        // Save the file
+        let path = tab.path.clone().unwrap();
+        let text = tab.editor.read(cx).value().to_string();
         match std::fs::write(&path, text.as_bytes()) {
             Ok(()) => {
-                self.dirty = false;
+                tab.dirty = false;
                 self.status = format!("Saved {}", display_name(&path));
             }
             Err(e) => self.status = format!("save failed: {e}"),
@@ -293,17 +410,30 @@ impl Workspace {
         else {
             return;
         };
-        let text = self.editor.read(cx).value().to_string();
+
+        // Get text first before mutable borrow
+        let active_idx = self.active_tab;
+        let text = {
+            let tab = match self.tabs.get(active_idx) {
+                Some(t) => t,
+                None => return,
+            };
+            tab.editor.read(cx).value().to_string()
+        };
+
         match std::fs::write(&path, text.as_bytes()) {
             Ok(()) => {
-                self.open = Some(path.clone());
-                self.selected_path = Some(path.clone());
-                self.untitled = false;
-                self.dirty = false;
                 let lang_id = lang::language_for(&path).unwrap_or("text");
-                self.editor.update(cx, |state, cx| {
-                    state.set_highlighter(lang_id, cx);
-                });
+                // Now update tab
+                if let Some(tab) = self.tabs.get_mut(active_idx) {
+                    tab.path = Some(path.clone());
+                    tab.untitled = false;
+                    tab.dirty = false;
+                    tab.editor.update(cx, |state, cx| {
+                        state.set_highlighter(lang_id, cx);
+                    });
+                }
+                self.selected_path = Some(path.clone());
                 if let Some(root) = &self.root {
                     self.tree = reload_dir_preserving(root, &self.tree);
                 }
@@ -312,6 +442,11 @@ impl Workspace {
             Err(e) => self.status = format!("save failed: {e}"),
         }
         cx.notify();
+    }
+
+    /// Get mutable reference to the active tab
+    fn active_tab_mut(&mut self) -> Option<&mut OpenTab> {
+        self.tabs.get_mut(self.active_tab)
     }
 
     pub(crate) fn toggle_dir(&mut self, path: &Path, cx: &mut Context<Self>) {
@@ -398,7 +533,9 @@ impl Workspace {
         self.explorer_section_expanded = true;
 
         let input = cx.new(|cx| {
-            let state = InputState::new(window, cx);
+            let state = InputState::new(window, cx)
+                .code_editor("text")
+                .line_number(false);
             state.focus(window, cx);
             state
         });
@@ -520,9 +657,11 @@ impl Workspace {
             std::fs::remove_file(path)
         };
         if res.is_ok() {
-            if self.open.as_ref() == Some(&path.to_path_buf()) {
-                self.open = None;
-                self.dirty = false;
+            // Close any tabs that have this file open
+            self.tabs.retain(|t| t.path.as_ref() != Some(&path.to_path_buf()));
+            // Adjust active_tab if needed
+            if self.active_tab >= self.tabs.len() {
+                self.active_tab = self.tabs.len().saturating_sub(1);
             }
             if self.selected_path.as_ref() == Some(&path.to_path_buf()) {
                 self.selected_path = None;
@@ -546,8 +685,11 @@ impl Workspace {
                 .save_file()
             {
                 if std::fs::rename(path, &new_path).is_ok() {
-                    if self.open.as_ref() == Some(&path.to_path_buf()) {
-                        self.open = Some(new_path.clone());
+                    // Update any tabs that have this file open
+                    for tab in &mut self.tabs {
+                        if tab.path.as_ref() == Some(&path.to_path_buf()) {
+                            tab.path = Some(new_path.clone());
+                        }
                     }
                     if self.selected_path.as_ref() == Some(&path.to_path_buf()) {
                         self.selected_path = Some(new_path.clone());
@@ -560,6 +702,109 @@ impl Workspace {
             }
         }
         cx.notify();
+    }
+
+    // Tab management methods
+
+    /// Switch to a specific tab by index
+    #[allow(dead_code)]
+    pub(crate) fn switch_tab(&mut self, index: usize) {
+        if index < self.tabs.len() {
+            self.active_tab = index;
+        }
+    }
+
+    /// Close a tab by index
+    pub(crate) fn close_tab(&mut self, index: usize, _window: &mut Window, cx: &mut Context<Self>) {
+        // Don't close if only one tab and it's clean (just show welcome)
+        if self.tabs.len() == 1 {
+            self.tabs.remove(0);
+            self.active_tab = 0;
+            cx.notify();
+            return;
+        }
+
+        // Remove the tab
+        self.tabs.remove(index);
+
+        // Adjust active tab index
+        if index <= self.active_tab && self.active_tab > 0 {
+            self.active_tab -= 1;
+        }
+        if self.active_tab >= self.tabs.len() {
+            self.active_tab = self.tabs.len().saturating_sub(1);
+        }
+
+        cx.notify();
+    }
+
+    /// Switch to a specific tab by index (called from tab bar click)
+    pub(crate) fn switch_tab_to(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index < self.tabs.len() {
+            self.active_tab = index;
+            // Clicking a tab also promotes it from preview to permanent (VS Code behavior)
+            if let Some(tab) = self.tabs.get_mut(index) {
+                tab.preview = false;
+            }
+            cx.notify();
+        }
+    }
+
+    /// Close a tab at a specific index (called from tab close button click)
+    pub(crate) fn close_tab_at_index(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index < self.tabs.len() {
+            // Don't close if only one tab - just show welcome
+            if self.tabs.len() == 1 {
+                self.tabs.remove(0);
+                self.active_tab = 0;
+            } else {
+                // Remove the tab
+                self.tabs.remove(index);
+                // Adjust active tab index
+                if index <= self.active_tab && self.active_tab > 0 {
+                    self.active_tab -= 1;
+                }
+                if self.active_tab >= self.tabs.len() {
+                    self.active_tab = self.tabs.len().saturating_sub(1);
+                }
+            }
+            cx.notify();
+        }
+    }
+
+    /// Action handlers for tab operations
+
+    pub(crate) fn handle_close_tab(&mut self, _: &crate::actions::CloseTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_tab(self.active_tab, window, cx);
+    }
+
+    pub(crate) fn handle_next_tab(&mut self, _: &crate::actions::NextTab, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.tabs.len() > 1 {
+            self.active_tab = (self.active_tab + 1) % self.tabs.len();
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn handle_prev_tab(&mut self, _: &crate::actions::PrevTab, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.tabs.len() > 1 {
+            self.active_tab = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
+            cx.notify();
+        }
+    }
+
+    /// Switch to a specific tab by index (called when tab is clicked)
+    pub(crate) fn handle_switch_tab(&mut self, action: &crate::actions::SwitchTab, _window: &mut Window, cx: &mut Context<Self>) {
+        if action.index < self.tabs.len() {
+            self.active_tab = action.index;
+            cx.notify();
+        }
+    }
+
+    /// Close a specific tab by index (called when close button is clicked)
+    pub(crate) fn handle_close_tab_at(&mut self, action: &crate::actions::CloseTabAt, window: &mut Window, cx: &mut Context<Self>) {
+        if action.index < self.tabs.len() {
+            self.close_tab(action.index, window, cx);
+        }
     }
 
     pub(crate) fn quit(&mut self, cx: &mut Context<Self>) {

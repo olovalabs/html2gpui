@@ -22,9 +22,27 @@ actions!(
         ToggleTerminal,
         About,
         ExplorerRefresh,
-        ExplorerCollapseAll
+        ExplorerCollapseAll,
+        CloseTab,
+        NextTab,
+        PrevTab,
+        CloseActiveTab
     ]
 );
+
+/// Select a specific tab by index (used by tab bar clicks)
+#[derive(Clone, Copy, Debug, Default, PartialEq, gpui::Action)]
+#[action(no_json)]
+pub struct SwitchTab {
+    pub index: usize,
+}
+
+/// Close a specific tab by index (used by tab close button clicks)
+#[derive(Clone, Copy, Debug, Default, PartialEq, gpui::Action)]
+#[action(no_json)]
+pub struct CloseTabAt {
+    pub index: usize,
+}
 
 /// Select a theme by index into `theme::all`. Payload action (not bound to
 /// any keymap), dispatched from the View → Theme submenu.

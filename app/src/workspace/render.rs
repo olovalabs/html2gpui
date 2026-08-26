@@ -24,18 +24,24 @@ impl Render for Workspace {
         let welcome = self.welcome_visible();
         let title = self.title();
         let tree = &self.tree;
-        let open = self.open.clone();
+        // Get the currently open file from active tab
+        let open = self.active_path().cloned();
         let selected_path = self.selected_path.clone();
         let explorer_section_expanded = self.explorer_section_expanded;
         let inline_creating = self.inline_creating.clone();
         let status = self.status.clone();
-        let editor = self.editor.clone();
         let activity = self.activity;
         let root_opt = self.root.clone();
         let show_sidebar = self.show_sidebar;
         let show_terminal = self.show_terminal;
         let theme_ix = self.theme_ix;
         let theme_name = th.name.clone();
+        
+        // Tab-related data
+        let tabs = self.tabs.clone();
+        let active_tab = self.active_tab;
+        // Get the active editor from the current tab
+        let editor = self.active_editor().cloned();
 
         div()
             .size_full()
@@ -112,6 +118,22 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, action: &ExplorerDelete, _, cx| {
                 this.delete_entry(&action.path, cx);
             }))
+            // Tab action handlers
+            .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
+                this.handle_close_tab(&CloseTab, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NextTab, window, cx| {
+                this.handle_next_tab(&NextTab, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PrevTab, window, cx| {
+                this.handle_prev_tab(&PrevTab, window, cx);
+            }))
+            .on_action(cx.listener(|this, action: &SwitchTab, window, cx| {
+                this.handle_switch_tab(action, window, cx);
+            }))
+            .on_action(cx.listener(|this, action: &CloseTabAt, window, cx| {
+                this.handle_close_tab_at(action, window, cx);
+            }))
             .child(ui::titlebar::render_titlebar(&title, &t, theme_ix))
             .child(
                 div()
@@ -154,20 +176,29 @@ impl Render for Workspace {
                             .flex()
                             .flex_col()
                             .bg(rgba(t.editor_bg))
+                            // Tab bar - only show when tabs exist
+                            .when(!tabs.is_empty(), |d| {
+                                d.child(ui::tab_bar::render_tab_bar(&tabs, active_tab, &t, cx))
+                            })
+                            // Editor area
                             .when(welcome, |d| d.child(ui::welcome::render_welcome(&t, cx)))
                             .when(!welcome, |d| {
-                                d.child(
-                                    div()
-                                        .flex_1()
-                                        .min_h(px(0.0))
-                                        .overflow_hidden()
-                                        .child(
-                                            Input::new(&editor)
-                                                .h_full()
-                                                .appearance(false)
-                                                .bordered(false),
-                                        ),
-                                 )
+                                if let Some(editor) = editor {
+                                    d.child(
+                                        div()
+                                            .flex_1()
+                                            .min_h(px(0.0))
+                                            .overflow_hidden()
+                                            .child(
+                                                Input::new(&editor)
+                                                    .h_full()
+                                                    .appearance(false)
+                                                    .bordered(false),
+                                            ),
+                                    )
+                                } else {
+                                    d.flex_1()
+                                }
                             })
                             .when(show_terminal, |d| d.child(ui::terminal::render_terminal(&t))),
                     ),

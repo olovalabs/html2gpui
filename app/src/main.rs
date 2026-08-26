@@ -43,6 +43,13 @@ fn main() {
                 KeyBinding::new("ctrl-shift-f", ShowSearch, None),
                 KeyBinding::new("ctrl-shift-g", ShowGit, None),
                 KeyBinding::new("ctrl-shift-x", ShowExtensions, None),
+                // Tab keybindings
+                KeyBinding::new("ctrl-w", CloseTab, None),
+                KeyBinding::new("cmd-w", CloseTab, None),
+                KeyBinding::new("ctrl-tab", NextTab, None),
+                KeyBinding::new("ctrl-shift-tab", PrevTab, None),
+                KeyBinding::new("cmd-alt-right", NextTab, None),
+                KeyBinding::new("cmd-alt-left", PrevTab, None),
             ]);
 
             // Start on GitHub Dark and paint tree-sitter captures with the

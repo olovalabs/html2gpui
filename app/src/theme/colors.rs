@@ -28,6 +28,10 @@ pub struct Colors {
     pub panel: u32,
     pub toolbar: u32,
     pub tab_bar: u32,
+    pub tab_active_bg: u32,
+    pub tab_inactive_bg: u32,
+    pub tab_active_fg: u32,
+    pub tab_inactive_fg: u32,
     pub editor_bg: u32,
     pub editor_fg: u32,
     pub terminal_bg: u32,
@@ -65,6 +69,10 @@ impl Colors {
             panel: Self::MISSING,
             toolbar: Self::MISSING,
             tab_bar: Self::MISSING,
+            tab_active_bg: Self::MISSING,
+            tab_inactive_bg: Self::MISSING,
+            tab_active_fg: Self::MISSING,
+            tab_inactive_fg: Self::MISSING,
             editor_bg: Self::MISSING,
             editor_fg: Self::MISSING,
             terminal_bg: Self::MISSING,
@@ -75,7 +83,7 @@ impl Colors {
     }
 
     #[cfg(test)]
-    fn values(&self) -> [u32; 29] {
+    fn values(&self) -> [u32; 33] {
         [
             self.background,
             self.surface,
@@ -100,6 +108,10 @@ impl Colors {
             self.panel,
             self.toolbar,
             self.tab_bar,
+            self.tab_active_bg,
+            self.tab_inactive_bg,
+            self.tab_active_fg,
+            self.tab_inactive_fg,
             self.editor_bg,
             self.editor_fg,
             self.terminal_bg,
@@ -134,6 +146,10 @@ impl Colors {
             "panel" => Some(&mut self.panel),
             "toolbar" => Some(&mut self.toolbar),
             "tab_bar" => Some(&mut self.tab_bar),
+            "tab_active_bg" => Some(&mut self.tab_active_bg),
+            "tab_inactive_bg" => Some(&mut self.tab_inactive_bg),
+            "tab_active_fg" => Some(&mut self.tab_active_fg),
+            "tab_inactive_fg" => Some(&mut self.tab_inactive_fg),
             "editor_bg" => Some(&mut self.editor_bg),
             "editor_fg" => Some(&mut self.editor_fg),
             "terminal_bg" => Some(&mut self.terminal_bg),
@@ -175,6 +191,10 @@ pub(crate) const KEY_MAP: &[(&str, &str)] = &[
     ("panel", "panel.background"),
     ("toolbar", "toolbar.background"),
     ("tab_bar", "tab_bar.background"),
+    ("tab_active_bg", "tab.active_background"),
+    ("tab_inactive_bg", "tab.inactive_background"),
+    ("tab_active_fg", "tab.active_foreground"),
+    ("tab_inactive_fg", "tab.inactive_foreground"),
     ("editor_bg", "editor.background"),
     ("editor_fg", "editor.foreground"),
     ("terminal_bg", "terminal.background"),
@@ -189,6 +209,10 @@ pub(crate) const FALLBACKS: &[(&str, u32)] = &[
     ("vc_added", 0x27a657ff),
     ("vc_modified", 0xd3b020ff),
     ("vc_deleted", 0xe06c76ff),
+    ("tab_active_bg", 0x1e1e1eff),
+    ("tab_inactive_bg", 0x252526ff),
+    ("tab_active_fg", 0xccccccff),
+    ("tab_inactive_fg", 0x808080ff),
 ];
 
 /// Parse `#RRGGBB` and `#RRGGBBAA` (Zed files use the latter) into RGBA8+alpha.
