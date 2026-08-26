@@ -36,6 +36,7 @@ impl Render for Workspace {
         let show_terminal = self.show_terminal;
         let theme_ix = self.theme_ix;
         let theme_name = th.name.clone();
+        let font_size = self.font_size;
         
         // Tab-related data
         let tabs = self.tabs.clone();
@@ -50,7 +51,7 @@ impl Render for Workspace {
             .font_family(SANS_FONT)
             .bg(rgba(t.background))
             .text_color(rgba(t.text))
-            .text_size(px(13.0))
+            .text_size(px(13.5))
             .on_action(cx.listener(|this, _: &Save, window, cx| this.save(window, cx)))
             .on_action(cx.listener(|this, _: &Quit, _, cx| this.quit(cx)))
             .on_action(cx.listener(|this, _: &ShowExplorer, _, cx| {
@@ -134,6 +135,26 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, action: &CloseTabAt, window, cx| {
                 this.handle_close_tab_at(action, window, cx);
             }))
+            // Font zoom actions
+            .on_action(cx.listener(|this, _: &IncreaseFontSize, _, cx| {
+                this.increase_font_size(cx);
+            }))
+            .on_action(cx.listener(|this, _: &DecreaseFontSize, _, cx| {
+                this.decrease_font_size(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ResetFontSize, _, cx| {
+                this.reset_font_size(cx);
+            }))
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                if event.keystroke.modifiers.control || event.keystroke.modifiers.platform {
+                    match event.keystroke.key.as_str() {
+                        "=" | "+" => this.increase_font_size(cx),
+                        "-" | "_" => this.decrease_font_size(cx),
+                        "0" => this.reset_font_size(cx),
+                        _ => {}
+                    }
+                }
+            }))
             .child(ui::titlebar::render_titlebar(&title, &t, theme_ix))
             .child(
                 div()
@@ -189,8 +210,11 @@ impl Render for Workspace {
                                             .flex_1()
                                             .min_h(px(0.0))
                                             .overflow_hidden()
+                                            .font_family(crate::assets::MONO_FONT)
+                                            .text_size(px(font_size))
                                             .child(
                                                 Input::new(&editor)
+                                                    .text_size(px(font_size))
                                                     .h_full()
                                                     .appearance(false)
                                                     .bordered(false),

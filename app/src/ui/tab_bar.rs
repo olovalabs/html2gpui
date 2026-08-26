@@ -44,7 +44,7 @@ fn render_tab_content(
         .h(px(TAB_HEIGHT))
         .bg(rgba(bg))
         .cursor_pointer()
-        .text_sm()
+        .text_size(px(13.5))
         .text_color(rgba(fg))
         .flex_shrink()
         .overflow_hidden()

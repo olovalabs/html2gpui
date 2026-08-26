@@ -67,5 +67,5 @@ pub fn sync_component_fonts(cx: &mut App) {
     theme.font_family = SANS_FONT.into();
     theme.mono_font_family = MONO_FONT.into();
     theme.font_size = px(14.0);
-    theme.mono_font_size = px(13.0);
+    theme.mono_font_size = px(14.5);
 }

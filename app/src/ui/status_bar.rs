@@ -16,7 +16,7 @@ pub(crate) fn render_status_bar(status: &str, theme_name: &str, t: &Colors) -> i
         .bg(rgba(t.status_bar))
         .border_t_1()
         .border_color(rgba(t.border_variant))
-        .text_size(px(12.0))
+        .text_size(px(12.5))
         .text_color(rgba(t.text))
         .child(
             div()

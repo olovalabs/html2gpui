@@ -50,6 +50,21 @@ fn main() {
                 KeyBinding::new("ctrl-shift-tab", PrevTab, None),
                 KeyBinding::new("cmd-alt-right", NextTab, None),
                 KeyBinding::new("cmd-alt-left", PrevTab, None),
+                // Font zoom keybindings (Zed-compatible)
+                KeyBinding::new("ctrl-=", IncreaseFontSize, None),
+                KeyBinding::new("ctrl-+", IncreaseFontSize, None),
+                KeyBinding::new("ctrl-shift-+", IncreaseFontSize, None),
+                KeyBinding::new("ctrl-shift-=", IncreaseFontSize, None),
+                KeyBinding::new("cmd-=", IncreaseFontSize, None),
+                KeyBinding::new("cmd-+", IncreaseFontSize, None),
+                KeyBinding::new("cmd-shift-+", IncreaseFontSize, None),
+                KeyBinding::new("cmd-shift-=", IncreaseFontSize, None),
+                KeyBinding::new("ctrl--", DecreaseFontSize, None),
+                KeyBinding::new("ctrl-_", DecreaseFontSize, None),
+                KeyBinding::new("cmd--", DecreaseFontSize, None),
+                KeyBinding::new("cmd-_", DecreaseFontSize, None),
+                KeyBinding::new("ctrl-0", ResetFontSize, None),
+                KeyBinding::new("cmd-0", ResetFontSize, None),
             ]);
 
             // Start on GitHub Dark and paint tree-sitter captures with the

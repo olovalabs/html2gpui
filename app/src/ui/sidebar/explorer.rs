@@ -4,9 +4,11 @@
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    div, prelude::*, px, rgba, AnyElement, Context, FontWeight, IntoElement, SharedString,
+    div, prelude::*, px, rgba, svg, AnyElement, Context, FontWeight, IntoElement, SharedString,
 };
-use gpui_component::{input::Input, menu::ContextMenuExt, scroll::ScrollableElement as _};
+use gpui_component::{
+    input::Input, menu::ContextMenuExt, scroll::ScrollableElement as _, Sizable,
+};
 
 use crate::actions::{
     ExplorerCollapseAll, ExplorerCopyPath, ExplorerCopyRelativePath, ExplorerDelete,
@@ -21,7 +23,7 @@ use crate::workspace::{CreatingKind, InlineCreating, Workspace};
 
 const INDENT_STEP: f32 = 14.0;
 const BASE_PAD: f32 = 12.0;
-const ROW_HEIGHT: f32 = 22.0;
+const ROW_HEIGHT: f32 = 24.0;
 const ICON_SIZE: f32 = 16.0;
 
 pub(crate) fn render_tree(
@@ -64,6 +66,11 @@ pub(crate) fn render_tree(
         file_icons::FOLDER_EXPANDED
     } else {
         file_icons::FOLDER_COLLAPSED
+    };
+    let root_chevron = if section_expanded {
+        "ui_icons/chevron-down_tint.svg"
+    } else {
+        "ui_icons/chevron-right_tint.svg"
     };
 
     let root_path_buf = root_path.map(|p| p.to_path_buf());
@@ -118,11 +125,27 @@ pub(crate) fn render_tree(
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(6.0))
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .w(px(14.0))
+                            .h(px(14.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .flex_none()
+                            .child(
+                                svg()
+                                    .path(root_chevron)
+                                    .w(px(10.0))
+                                    .h(px(10.0))
+                                    .text_color(rgba(t.icon_muted)),
+                            ),
+                    )
                     .child(icon_img(root_folder_icon, ICON_SIZE))
                     .child(
                         div()
-                            .text_size(px(13.0))
+                            .text_size(px(13.5))
                             .font_weight(FontWeight::BOLD)
                             .text_color(rgba(t.text))
                             .child(SharedString::from(folder.to_lowercase())),
@@ -196,7 +219,7 @@ pub(crate) fn render_tree(
 fn inline_create_row(
     creating: &InlineCreating,
     depth: usize,
-    _t: &Colors,
+    t: &Colors,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
     let pad = BASE_PAD + depth as f32 * INDENT_STEP;
@@ -242,25 +265,30 @@ fn inline_create_row(
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(6.0))
         .pl(px(pad))
-        .pr(px(8.0))
+        .pr(px(10.0))
+        .child(
+            // Chevron spacer so icon aligns with folder/file icons
+            div().w(px(14.0)).h(px(14.0)).flex_none(),
+        )
+        .child(div().w(px(4.0)).flex_none())
         .child(icon_img(icon, ICON_SIZE))
+        .child(div().w(px(6.0)).flex_none())
         .child(
             div()
                 .flex_1()
-                .h(px(20.0))
+                .h(px(22.0))
                 .flex()
                 .items_center()
-                .bg(rgba(0x1e1e1eff))
+                .bg(rgba(t.background))
                 .border_1()
-                .border_color(rgba(0x0078d4ff))
-                .rounded(px(2.0))
-                .px(px(3.0))
+                .border_color(rgba(t.border_focused))
+                .rounded(px(4.0))
+                .px(px(2.0))
                 .child(
                     Input::new(&creating.input)
-                        .h(px(18.0))
-                        .text_size(px(13.0))
+                        .xsmall()
+                        .text_size(px(13.5))
                         .appearance(false)
                         .bordered(false),
                 ),
@@ -326,22 +354,48 @@ fn tree_row(
         t.text
     };
 
+    let chevron_element = if is_dir {
+        let chev_path = if expanded {
+            "ui_icons/chevron-down_tint.svg"
+        } else {
+            "ui_icons/chevron-right_tint.svg"
+        };
+        div()
+            .w(px(14.0))
+            .h(px(14.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .flex_none()
+            .child(
+                svg()
+                    .path(chev_path)
+                    .w(px(10.0))
+                    .h(px(10.0))
+                    .text_color(rgba(t.icon_muted)),
+            )
+    } else {
+        div().w(px(14.0)).h(px(14.0)).flex_none()
+    };
+
     let content = div()
         .w_full()
         .h_full()
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(6.0))
         .pl(px(pad))
         .pr(px(8.0))
+        .child(chevron_element)
+        .child(div().w(px(4.0)).flex_none())
         .child(icon_img(icon_path, ICON_SIZE))
+        .child(div().w(px(6.0)).flex_none())
         .child(
             div()
                 .min_w(px(0.0))
                 .overflow_hidden()
                 .text_ellipsis()
-                .text_size(px(13.0))
+                .text_size(px(13.5))
                 .text_color(rgba(text_color))
                 .child(SharedString::from(name)),
         );

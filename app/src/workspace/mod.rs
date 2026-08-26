@@ -76,6 +76,8 @@ pub(crate) struct Workspace {
     pub(crate) show_sidebar: bool,
     pub(crate) show_terminal: bool,
     pub(crate) theme_ix: usize,
+    /// Editor buffer font size in pixels (supports Ctrl++/Ctrl-- zoom like Zed)
+    pub(crate) font_size: f32,
     /// Open tabs
     pub(crate) tabs: Vec<OpenTab>,
     /// Index of the currently active tab
@@ -100,6 +102,7 @@ impl Workspace {
             show_sidebar: true,
             show_terminal: false,
             theme_ix: theme::default_index(),
+            font_size: 14.5,
             tabs: Vec::new(),
             active_tab: 0,
         }
@@ -533,9 +536,7 @@ impl Workspace {
         self.explorer_section_expanded = true;
 
         let input = cx.new(|cx| {
-            let state = InputState::new(window, cx)
-                .code_editor("text")
-                .line_number(false);
+            let state = InputState::new(window, cx);
             state.focus(window, cx);
             state
         });
@@ -805,6 +806,27 @@ impl Workspace {
         if action.index < self.tabs.len() {
             self.close_tab(action.index, window, cx);
         }
+    }
+
+    pub(crate) fn increase_font_size(&mut self, cx: &mut Context<Self>) {
+        self.font_size = (self.font_size + 1.0).min(36.0);
+        gpui_component::Theme::global_mut(cx).mono_font_size = gpui::px(self.font_size);
+        self.status = format!("Editor font size: {:.1}px", self.font_size);
+        cx.notify();
+    }
+
+    pub(crate) fn decrease_font_size(&mut self, cx: &mut Context<Self>) {
+        self.font_size = (self.font_size - 1.0).max(9.0);
+        gpui_component::Theme::global_mut(cx).mono_font_size = gpui::px(self.font_size);
+        self.status = format!("Editor font size: {:.1}px", self.font_size);
+        cx.notify();
+    }
+
+    pub(crate) fn reset_font_size(&mut self, cx: &mut Context<Self>) {
+        self.font_size = 14.5;
+        gpui_component::Theme::global_mut(cx).mono_font_size = gpui::px(self.font_size);
+        self.status = format!("Editor font size reset: {:.1}px", self.font_size);
+        cx.notify();
     }
 
     pub(crate) fn quit(&mut self, cx: &mut Context<Self>) {

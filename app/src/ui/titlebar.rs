@@ -23,7 +23,7 @@ pub(crate) fn render_titlebar(title: &str, t: &Colors, theme_ix: usize) -> impl 
                 .flex()
                 .flex_row()
                 .items_center()
-                .text_size(px(13.0))
+                .text_size(px(13.5))
                 .child(
                     // App icon on the left of the menu
                     div()
@@ -74,6 +74,10 @@ pub(crate) fn render_titlebar(title: &str, t: &Colors, theme_ix: usize) -> impl 
                         .separator()
                         .menu("Toggle Primary Side Bar", Box::new(ToggleSidebar))
                         .menu("Toggle Terminal", Box::new(ToggleTerminal))
+                        .separator()
+                        .menu("Zoom In (Ctrl++)", Box::new(IncreaseFontSize))
+                        .menu("Zoom Out (Ctrl+-)", Box::new(DecreaseFontSize))
+                        .menu("Reset Zoom (Ctrl+0)", Box::new(ResetFontSize))
                 }))
                 .child(menu_btn("m-term", "Terminal", t, |menu, _, _| {
                     menu.menu("New Terminal", Box::new(ToggleTerminal))
@@ -88,7 +92,7 @@ pub(crate) fn render_titlebar(title: &str, t: &Colors, theme_ix: usize) -> impl 
                         .flex()
                         .items_center()
                         .justify_center()
-                        .text_size(px(12.0))
+                        .text_size(px(13.0))
                         .text_color(rgba(t.text))
                         .child(SharedString::from(title.to_string())),
                 ),

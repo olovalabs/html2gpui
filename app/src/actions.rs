@@ -26,7 +26,10 @@ actions!(
         CloseTab,
         NextTab,
         PrevTab,
-        CloseActiveTab
+        CloseActiveTab,
+        IncreaseFontSize,
+        DecreaseFontSize,
+        ResetFontSize
     ]
 );
 
