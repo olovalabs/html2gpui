@@ -517,8 +517,17 @@ fn handle_incoming_message(msg: &Value, event_tx: &async_channel::Sender<LspEven
 
     if method == "textDocument/publishDiagnostics" {
         if let Some(params) = msg.get("params") {
-            if let Ok(pub_diag) = serde_json::from_value::<PublishDiagnosticsParams>(params.clone()) {
+            if let Ok(mut pub_diag) = serde_json::from_value::<PublishDiagnosticsParams>(params.clone()) {
                 if let Some(path) = uri_to_path(&pub_diag.uri) {
+                    for diag in &mut pub_diag.diagnostics {
+                        let source_str = diag.source.as_deref().unwrap_or("typescript");
+                        let code_str = match &diag.code {
+                            Some(lsp_types::NumberOrString::Number(n)) => format!(" ({n})"),
+                            Some(lsp_types::NumberOrString::String(s)) => format!(" ({s})"),
+                            None => String::new(),
+                        };
+                        diag.message = format!("`{source_str}{code_str}`\n\n{}", diag.message);
+                    }
                     let _ = event_tx.try_send(LspEvent::Diagnostics {
                         path,
                         diagnostics: pub_diag.diagnostics,

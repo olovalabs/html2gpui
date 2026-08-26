@@ -145,6 +145,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ResetFontSize, _, cx| {
                 this.reset_font_size(cx);
             }))
+            .on_action(cx.listener(|this, _: &CopyDiagnostic, _, cx| {
+                this.copy_active_diagnostic(cx);
+            }))
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                 if event.keystroke.modifiers.control || event.keystroke.modifiers.platform {
                     match event.keystroke.key.as_str() {

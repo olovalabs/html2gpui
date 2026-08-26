@@ -5,7 +5,11 @@ use gpui::{div, prelude::*, px, rgba, svg, IntoElement, SharedString};
 
 use crate::theme::Colors;
 
-pub(crate) fn render_status_bar(status: &str, theme_name: &str, t: &Colors) -> impl IntoElement {
+pub(crate) fn render_status_bar(
+    status: &str,
+    theme_name: &str,
+    t: &Colors,
+) -> impl IntoElement {
     div()
         .h(px(26.0))
         .w_full()

@@ -66,6 +66,8 @@ fn main() {
                 KeyBinding::new("cmd-_", DecreaseFontSize, None),
                 KeyBinding::new("ctrl-0", ResetFontSize, None),
                 KeyBinding::new("cmd-0", ResetFontSize, None),
+                KeyBinding::new("ctrl-alt-c", CopyDiagnostic, None),
+                KeyBinding::new("cmd-alt-c", CopyDiagnostic, None),
             ]);
 
             // Start on GitHub Dark and paint tree-sitter captures with the

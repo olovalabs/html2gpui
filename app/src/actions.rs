@@ -29,7 +29,8 @@ actions!(
         CloseActiveTab,
         IncreaseFontSize,
         DecreaseFontSize,
-        ResetFontSize
+        ResetFontSize,
+        CopyDiagnostic
     ]
 );
 

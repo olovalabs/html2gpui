@@ -4,6 +4,7 @@
 
 mod render;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -81,6 +82,8 @@ pub(crate) struct Workspace {
     pub(crate) font_size: f32,
     /// Language Server Protocol client manager
     pub(crate) lsp: Arc<Mutex<LspManager>>,
+    /// Active diagnostics received from language servers
+    pub(crate) diagnostics_by_path: HashMap<PathBuf, Vec<lsp_types::Diagnostic>>,
     /// Open tabs
     pub(crate) tabs: Vec<OpenTab>,
     /// Index of the currently active tab
@@ -131,6 +134,7 @@ impl Workspace {
             theme_ix: theme::default_index(),
             font_size: 14.5,
             lsp,
+            diagnostics_by_path: HashMap::new(),
             tabs: Vec::new(),
             active_tab: 0,
         }
@@ -756,8 +760,14 @@ impl Workspace {
         diagnostics: Vec<lsp_types::Diagnostic>,
         cx: &mut Context<Self>,
     ) {
+        self.diagnostics_by_path
+            .insert(path.to_path_buf(), diagnostics.clone());
+
         let mut updated = false;
-        for tab in &mut self.tabs {
+        let mut active_msg = None;
+        let active_tab_idx = self.active_tab;
+
+        for (idx, tab) in self.tabs.iter_mut().enumerate() {
             if let Some(tab_path) = &tab.path {
                 if crate::lsp::paths_match(tab_path, path) {
                     tab.editor.update(cx, |state, _cx| {
@@ -767,14 +777,46 @@ impl Workspace {
                                 diag_set.push(d.clone());
                             }
                             updated = true;
+                            if idx == active_tab_idx {
+                                if let Some(first) = diagnostics.first() {
+                                    active_msg = Some(first.message.clone());
+                                }
+                            }
                         }
                     });
                 }
             }
         }
+
+        if let Some(msg) = active_msg {
+            self.status = format!("Problem: {} (Ctrl+Alt+C to copy)", msg);
+        }
+
         if updated {
             cx.notify();
         }
+    }
+
+    pub(crate) fn copy_active_diagnostic(&mut self, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get(self.active_tab) {
+            if let Some(tab_path) = &tab.path {
+                for (p, diags) in &self.diagnostics_by_path {
+                    if crate::lsp::paths_match(p, tab_path) && !diags.is_empty() {
+                        let msg = diags
+                            .iter()
+                            .map(|d| format!("{}: {}", d.source.as_deref().unwrap_or("error"), d.message))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(msg));
+                        self.status = format!("Copied: {}", diags[0].message);
+                        cx.notify();
+                        return;
+                    }
+                }
+            }
+        }
+        self.status = "No active problem to copy".into();
+        cx.notify();
     }
 
     // Tab management methods

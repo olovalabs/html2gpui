@@ -53,6 +53,8 @@ pub(crate) fn render_titlebar(title: &str, t: &Colors, theme_ix: usize) -> impl 
                         .menu("Paste", Box::new(Paste))
                         .separator()
                         .menu("Select All", Box::new(SelectAll))
+                        .separator()
+                        .menu("Copy Problem / Error (Ctrl+Alt+C)", Box::new(CopyDiagnostic))
                 }))
                 .child(menu_btn("m-view", "View", t, move |menu, window, cx| {
                     menu.menu("Explorer", Box::new(ShowExplorer))
