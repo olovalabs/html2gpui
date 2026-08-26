@@ -10,6 +10,7 @@ use gpui_component::{
 
 use crate::actions::*;
 use crate::theme::{self, Colors};
+use crate::ui::app_icon;
 
 pub(crate) fn render_titlebar(title: &str, t: &Colors, theme_ix: usize) -> impl IntoElement {
     TitleBar::new()
@@ -23,6 +24,16 @@ pub(crate) fn render_titlebar(title: &str, t: &Colors, theme_ix: usize) -> impl 
                 .flex_row()
                 .items_center()
                 .text_size(px(13.0))
+                .child(
+                    // App icon on the left of the menu
+                    div()
+                        .w(px(28.0))
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(app_icon::render_app_icon(20.0, t)),
+                )
                 .child(menu_btn("m-file", "File", t, |menu, _, _| {
                     menu.menu("New File", Box::new(NewFile))
                         .separator()

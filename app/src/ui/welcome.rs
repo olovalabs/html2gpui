@@ -4,6 +4,7 @@
 use gpui::{div, prelude::*, px, rgba, App, Context, FontWeight, IntoElement, SharedString, Window};
 
 use crate::theme::Colors;
+use crate::ui::app_icon;
 use crate::workspace::Workspace;
 
 /// Start screen shown when no folder is open and no file is being edited.
@@ -17,12 +18,13 @@ pub(crate) fn render_welcome(t: &Colors, cx: &mut Context<Workspace>) -> impl In
         .justify_center()
         .gap(px(10.0))
         .bg(rgba(t.editor_bg))
+        .child(app_icon::render_app_icon(96.0, t))
         .child(
             div()
                 .text_size(px(42.0))
                 .font_weight(FontWeight::BOLD)
                 .text_color(rgba(t.text))
-                .child(SharedString::from("gpui editor")),
+                .child(SharedString::from("olova editor")),
         )
         .child(
             div()
