@@ -40,6 +40,8 @@ fn main() {
                 KeyBinding::new("ctrl-o", OpenFile, None),
                 KeyBinding::new("cmd-o", OpenFile, None),
                 KeyBinding::new("ctrl-`", ToggleTerminal, None),
+                KeyBinding::new("ctrl-j", ToggleTerminal, None),
+                KeyBinding::new("cmd-j", ToggleTerminal, None),
                 KeyBinding::new("ctrl-b", ToggleSidebar, None),
                 KeyBinding::new("ctrl-shift-e", ShowExplorer, None),
                 KeyBinding::new("ctrl-shift-f", ShowSearch, None),

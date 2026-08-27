@@ -166,12 +166,20 @@ impl Render for Workspace {
                         activity, show_sidebar, &t, cx,
                     ))
                     .child(
-                        h_resizable("workspace-h-resizable")
+                        // Keep separate layout state for the sidebar-visible and
+                        // sidebar-hidden layouts so the default width is respected.
+                        h_resizable(if show_sidebar {
+                            "workspace-h-resizable-with-sidebar"
+                        } else {
+                            "workspace-h-resizable-editor-only"
+                        })
                             .when(show_sidebar, |group| {
                                 group.child(
                                     resizable_panel()
-                                        .size(px(260.0))
-                                        .size_range(px(160.0)..px(600.0))
+                                        .size(px(300.0))
+                                        // Keep the sidebar at the VS Code-like width even
+                                        // when the window is maximized or resized.
+                                        .size_range(px(170.0)..px(300.0))
                                         .child(match activity {
                                             Activity::Explorer => match &root_opt {
                                                 Some(root) => ui::sidebar::explorer::render_tree(
@@ -197,7 +205,14 @@ impl Render for Workspace {
                             })
                             .child(
                                 resizable_panel().child(
-                                    v_resizable("workspace-v-resizable")
+                                    // Use a separate state when the terminal is visible so it
+                                    // gets its configured initial height instead of inheriting
+                                    // the editor-only layout's minimum panel size.
+                                    v_resizable(if show_terminal {
+                                        "workspace-v-resizable-with-terminal"
+                                    } else {
+                                        "workspace-v-resizable-editor-only"
+                                    })
                                         .child(
                                             resizable_panel().child(
                                                 div()
@@ -240,7 +255,9 @@ impl Render for Workspace {
                                             if let Some(term) = &terminal {
                                                 group.child(
                                                     resizable_panel()
-                                                        .size(px(240.0))
+                                                        // VS Code opens the terminal as a substantial bottom panel.
+                                                        // Keep this as the default while preserving the drag range.
+                                                        .size(px(320.0))
                                                         .size_range(px(80.0)..px(2000.0))
                                                         .child(crate::terminal::render_terminal(term, &t, cx)),
                                                 )

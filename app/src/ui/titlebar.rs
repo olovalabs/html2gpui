@@ -82,7 +82,7 @@ pub(crate) fn render_titlebar(title: &str, t: &Colors, theme_ix: usize) -> impl 
                         .menu("Reset Zoom (Ctrl+0)", Box::new(ResetFontSize))
                 }))
                 .child(menu_btn("m-term", "Terminal", t, |menu, _, _| {
-                    menu.menu("New Terminal", Box::new(ToggleTerminal))
+                    menu.menu("Toggle Terminal (Ctrl+J)", Box::new(ToggleTerminal))
                 }))
                 .child(menu_btn("m-help", "Help", t, |menu, _, _| {
                     menu.menu("About", Box::new(About))
