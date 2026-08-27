@@ -52,8 +52,7 @@ pub(crate) fn render_tree(
     }
 
     let mut col = div()
-        .w(px(260.0))
-        .h_full()
+        .size_full()
         .flex()
         .flex_col()
         .bg(rgba(t.panel))

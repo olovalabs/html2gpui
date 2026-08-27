@@ -7,8 +7,7 @@ use crate::ui::common::{mock_input, panel_header};
 
 pub(crate) fn render_search_panel(t: &Colors) -> AnyElement {
     div()
-        .w(px(260.0))
-        .h_full()
+        .size_full()
         .flex()
         .flex_col()
         .bg(rgba(t.panel))

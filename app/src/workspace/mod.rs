@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use gpui::{AppContext, Context, Entity, Window};
 use gpui_component::input::{InputEvent, InputState, TabSize};
+use notify::Watcher as _;
 
 use crate::fs_tree::{collapse_all, display_name, load_dir, reload_dir_preserving, TreeNode};
 use crate::lang;
@@ -84,6 +85,12 @@ pub(crate) struct Workspace {
     pub(crate) lsp: Arc<Mutex<LspManager>>,
     /// Active diagnostics received from language servers
     pub(crate) diagnostics_by_path: HashMap<PathBuf, Vec<lsp_types::Diagnostic>>,
+    /// Integrated Terminal instance
+    pub(crate) terminal: Option<Entity<crate::terminal::Terminal>>,
+    /// File system change notification sender
+    pub(crate) fs_event_tx: async_channel::Sender<()>,
+    /// Background file system watcher
+    pub(crate) _watcher: Option<notify::RecommendedWatcher>,
     /// Open tabs
     pub(crate) tabs: Vec<OpenTab>,
     /// Index of the currently active tab
@@ -118,6 +125,28 @@ impl Workspace {
         })
         .detach();
 
+        let (fs_event_tx, fs_event_rx) = async_channel::unbounded::<()>();
+
+        // Background automatic file tree refresh listener with debouncing
+        cx.spawn({
+            let rx = fs_event_rx.clone();
+            async move |this, cx| {
+                while let Ok(()) = rx.recv().await {
+                    while rx.try_recv().is_ok() {}
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    while rx.try_recv().is_ok() {}
+
+                    let _ = this.update(cx, |workspace, cx| {
+                        if let Some(root) = workspace.root.clone() {
+                            workspace.tree = reload_dir_preserving(&root, &workspace.tree);
+                            cx.notify();
+                        }
+                    });
+                }
+            }
+        })
+        .detach();
+
         // Start with NO project loaded — the welcome screen offers
         // Open Folder / Open File / New File (VS Code-style).
         Self {
@@ -135,6 +164,9 @@ impl Workspace {
             font_size: 14.5,
             lsp,
             diagnostics_by_path: HashMap::new(),
+            terminal: None,
+            fs_event_tx,
+            _watcher: None,
             tabs: Vec::new(),
             active_tab: 0,
         }
@@ -218,6 +250,28 @@ impl Workspace {
         self.selected_path = None;
         self.inline_creating = None;
         self.status = format!("Opened folder {}", display_name(&path));
+
+        // Start filesystem watcher on the root directory
+        let tx = self.fs_event_tx.clone();
+        let watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+            if let Ok(event) = res {
+                let should_notify = event.paths.iter().any(|p| {
+                    let path_str = p.to_string_lossy();
+                    !path_str.contains("target")
+                        && !path_str.contains(".git")
+                        && !path_str.contains(".DS_Store")
+                });
+                if should_notify {
+                    let _ = tx.try_send(());
+                }
+            }
+        });
+
+        if let Ok(mut w) = watcher {
+            let _ = w.watch(&path, notify::RecursiveMode::Recursive);
+            self._watcher = Some(w);
+        }
+
         cx.notify();
     }
 
@@ -271,6 +325,25 @@ impl Workspace {
         });
         self.active_tab = self.tabs.len() - 1;
         self.status = "Untitled file — Ctrl+S to save".into();
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_terminal = !self.show_terminal;
+        if self.show_terminal && self.terminal.is_none() {
+            let root = self.root.clone();
+            let term = cx.new(|cx| crate::terminal::Terminal::new(root.as_deref(), window, cx));
+            self.terminal = Some(term);
+        }
+        if self.show_terminal {
+            if let Some(term) = &self.terminal {
+                let focus = term.read(cx).focus_handle(cx);
+                focus.focus(window);
+            }
+            self.status = "Terminal active".into();
+        } else {
+            self.status = "Terminal hidden".into();
+        }
         cx.notify();
     }
 

@@ -99,8 +99,7 @@ fn welcome_button(
 /// Explorer placeholder when the app started without a folder.
 pub(crate) fn render_no_folder_panel(t: &Colors, cx: &mut Context<Workspace>) -> gpui::AnyElement {
     div()
-        .w(px(260.0))
-        .h_full()
+        .size_full()
         .flex()
         .flex_col()
         .items_center()

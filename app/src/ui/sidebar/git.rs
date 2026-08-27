@@ -7,8 +7,7 @@ use crate::ui::common::{mock_input, panel_header, section_strip};
 
 pub(crate) fn render_git_panel(t: &Colors) -> AnyElement {
     div()
-        .w(px(260.0))
-        .h_full()
+        .size_full()
         .flex()
         .flex_col()
         .bg(rgba(t.panel))

@@ -7,6 +7,5 @@ pub mod common;
 pub mod sidebar;
 pub mod status_bar;
 pub mod tab_bar;
-pub mod terminal;
 pub mod titlebar;
 pub mod welcome;

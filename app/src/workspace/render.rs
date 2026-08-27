@@ -4,6 +4,7 @@
 
 use gpui::{div, prelude::*, px, rgba, Context, Render, Window};
 use gpui_component::input::Input;
+use gpui_component::resizable::{h_resizable, resizable_panel, v_resizable};
 
 use crate::actions::*;
 use crate::assets::SANS_FONT;
@@ -37,6 +38,7 @@ impl Render for Workspace {
         let theme_ix = self.theme_ix;
         let theme_name = th.name.clone();
         let font_size = self.font_size;
+        let terminal = self.terminal.clone();
         
         // Tab-related data
         let tabs = self.tabs.clone();
@@ -72,14 +74,8 @@ impl Render for Workspace {
                     cx.notify();
                 }),
             )
-            .on_action(cx.listener(|this, _: &ToggleTerminal, _, cx| {
-                this.show_terminal = !this.show_terminal;
-                this.status = if this.show_terminal {
-                    "Terminal".into()
-                } else {
-                    "Terminal hidden".into()
-                };
-                cx.notify();
+            .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
+                this.toggle_terminal(window, cx);
             }))
             .on_action(cx.listener(|this, _: &NewFile, window, cx| this.new_file(window, cx)))
             .on_action(cx.listener(|this, _: &OpenFile, window, cx| {
@@ -169,65 +165,91 @@ impl Render for Workspace {
                     .child(ui::activity_bar::render_activity_bar(
                         activity, show_sidebar, &t, cx,
                     ))
-                    .when(show_sidebar, |d| {
-                        d.child(match activity {
-                            Activity::Explorer => match &root_opt {
-                                Some(root) => ui::sidebar::explorer::render_tree(
-                                    tree,
-                                    Some(root.as_path()),
-                                    open.as_ref(),
-                                    selected_path.as_ref(),
-                                    explorer_section_expanded,
-                                    inline_creating.as_ref(),
-                                    &display_name(root),
-                                    &t,
-                                    cx,
-                                ),
-                                None => ui::welcome::render_no_folder_panel(&t, cx),
-                            },
-                            Activity::Search => ui::sidebar::search::render_search_panel(&t),
-                            Activity::Git => ui::sidebar::git::render_git_panel(&t),
-                            Activity::Extensions => {
-                                ui::sidebar::extensions::render_extensions_panel(&t)
-                            }
-                        })
-                    })
                     .child(
-                        div()
-                            .flex_1()
-                            .h_full()
-                            .min_w(px(0.0))
-                            .flex()
-                            .flex_col()
-                            .bg(rgba(t.editor_bg))
-                            // Tab bar - only show when tabs exist
-                            .when(!tabs.is_empty(), |d| {
-                                d.child(ui::tab_bar::render_tab_bar(&tabs, active_tab, &t, cx))
+                        h_resizable("workspace-h-resizable")
+                            .when(show_sidebar, |group| {
+                                group.child(
+                                    resizable_panel()
+                                        .size(px(260.0))
+                                        .size_range(px(160.0)..px(600.0))
+                                        .child(match activity {
+                                            Activity::Explorer => match &root_opt {
+                                                Some(root) => ui::sidebar::explorer::render_tree(
+                                                    tree,
+                                                    Some(root.as_path()),
+                                                    open.as_ref(),
+                                                    selected_path.as_ref(),
+                                                    explorer_section_expanded,
+                                                    inline_creating.as_ref(),
+                                                    &display_name(root),
+                                                    &t,
+                                                    cx,
+                                                ),
+                                                None => ui::welcome::render_no_folder_panel(&t, cx),
+                                            },
+                                            Activity::Search => ui::sidebar::search::render_search_panel(&t),
+                                            Activity::Git => ui::sidebar::git::render_git_panel(&t),
+                                            Activity::Extensions => {
+                                                ui::sidebar::extensions::render_extensions_panel(&t)
+                                            }
+                                        }),
+                                )
                             })
-                            // Editor area
-                            .when(welcome, |d| d.child(ui::welcome::render_welcome(&t, cx)))
-                            .when(!welcome, |d| {
-                                if let Some(editor) = editor {
-                                    d.child(
-                                        div()
-                                            .flex_1()
-                                            .min_h(px(0.0))
-                                            .overflow_hidden()
-                                            .font_family(crate::assets::MONO_FONT)
-                                            .text_size(px(font_size))
-                                            .child(
-                                                Input::new(&editor)
-                                                    .text_size(px(font_size))
+                            .child(
+                                resizable_panel().child(
+                                    v_resizable("workspace-v-resizable")
+                                        .child(
+                                            resizable_panel().child(
+                                                div()
+                                                    .flex_1()
                                                     .h_full()
-                                                    .appearance(false)
-                                                    .bordered(false),
+                                                    .min_w(px(0.0))
+                                                    .flex()
+                                                    .flex_col()
+                                                    .bg(rgba(t.editor_bg))
+                                                    // Tab bar - only show when tabs exist
+                                                    .when(!tabs.is_empty(), |d| {
+                                                        d.child(ui::tab_bar::render_tab_bar(&tabs, active_tab, &t, cx))
+                                                    })
+                                                    // Editor area
+                                                    .when(welcome, |d| d.child(ui::welcome::render_welcome(&t, cx)))
+                                                    .when(!welcome, |d| {
+                                                        if let Some(editor) = editor {
+                                                            d.child(
+                                                                div()
+                                                                    .flex_1()
+                                                                    .min_h(px(0.0))
+                                                                    .overflow_hidden()
+                                                                    .font_family(crate::assets::MONO_FONT)
+                                                                    .text_size(px(font_size))
+                                                                    .child(
+                                                                        Input::new(&editor)
+                                                                            .text_size(px(font_size))
+                                                                            .h_full()
+                                                                            .appearance(false)
+                                                                            .bordered(false),
+                                                                    ),
+                                                            )
+                                                        } else {
+                                                            d.flex_1()
+                                                        }
+                                                    }),
                                             ),
-                                    )
-                                } else {
-                                    d.flex_1()
-                                }
-                            })
-                            .when(show_terminal, |d| d.child(ui::terminal::render_terminal(&t))),
+                                        )
+                                        .when(show_terminal, |group| {
+                                            if let Some(term) = &terminal {
+                                                group.child(
+                                                    resizable_panel()
+                                                        .size(px(240.0))
+                                                        .size_range(px(80.0)..px(2000.0))
+                                                        .child(crate::terminal::render_terminal(term, &t, cx)),
+                                                )
+                                            } else {
+                                                group
+                                            }
+                                        }),
+                                ),
+                            ),
                     ),
             )
             .child(ui::status_bar::render_status_bar(&status, &theme_name, &t))

@@ -10,6 +10,7 @@ mod file_icons;
 mod fs_tree;
 mod lang;
 mod lsp;
+mod terminal;
 mod theme;
 mod ui;
 mod workspace;
