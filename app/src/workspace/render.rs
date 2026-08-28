@@ -8,6 +8,7 @@ use gpui::{
 use gpui_component::input::Input;
 
 use crate::actions::*;
+use crate::lang;
 
 use crate::theme::Colors;
 use crate::ui;
@@ -26,6 +27,12 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(path) = self.pending_open.take() {
             self.open_file(path, window, cx);
+        }
+        // Enter in the commit box was pressed (the input's event callback has
+        // no window handle) — run the commit now that the window is here.
+        if self.git_commit_pending {
+            self.git_commit_pending = false;
+            self.git_commit(window, cx);
         }
 
         let th = self.theme();
@@ -71,8 +78,18 @@ impl Render for Workspace {
         let tabs = &self.tabs;
         let active_tab = self.active_tab;
         let is_settings = self.tabs.get(active_tab).map(|t| t.is_settings).unwrap_or(false);
+        // The active tab may be a Git diff view instead of an editor.
+        let active_diff = self.tabs.get(active_tab).and_then(|t| t.diff.as_ref());
         // Get the active editor from the current tab
         let editor = self.active_editor();
+        // Git state for the activity-bar badge / status bar.
+        let git_repo = self.git.as_ref();
+        let git_changes = git_repo.map(|g| g.change_count()).unwrap_or(0);
+        let git_branch = git_repo.and_then(|g| g.branch.clone());
+        let git_commit_input = self.git_commit_input.clone();
+        // Active file language + LSP readiness for the status bar.
+        let lang_label = open.and_then(|p| lang::language_for(p));
+        let lsp_ready = lang_label.map(|l| self.lsp.lock().unwrap().has_client(l));
 
         div()
             .size_full()
@@ -85,17 +102,17 @@ impl Render for Workspace {
             // Commands handled directly by the workspace.
             .on_action(cx.listener(|this, _: &Save, window, cx| this.save(window, cx)))
             .on_action(cx.listener(|this, _: &Quit, _, cx| this.quit(cx)))
-            .on_action(cx.listener(|this, _: &ShowExplorer, _, cx| {
-                this.set_activity_explicit(Activity::Explorer, cx);
+            .on_action(cx.listener(|this, _: &ShowExplorer, window, cx| {
+                this.set_activity_explicit(Activity::Explorer, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &ShowSearch, _, cx| {
-                this.set_activity_explicit(Activity::Search, cx);
+            .on_action(cx.listener(|this, _: &ShowSearch, window, cx| {
+                this.set_activity_explicit(Activity::Search, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &ShowGit, _, cx| {
-                this.set_activity_explicit(Activity::Git, cx);
+            .on_action(cx.listener(|this, _: &ShowGit, window, cx| {
+                this.set_activity_explicit(Activity::Git, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &ShowExtensions, _, cx| {
-                this.set_activity_explicit(Activity::Extensions, cx);
+            .on_action(cx.listener(|this, _: &ShowExtensions, window, cx| {
+                this.set_activity_explicit(Activity::Extensions, window, cx);
             }))
             .on_action(
                 cx.listener(|this, _: &ToggleSidebar, _, cx| {
@@ -179,6 +196,41 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &CopyDiagnostic, _, cx| {
                 this.copy_active_diagnostic(cx);
             }))
+            // Format the active document via its language server.
+            .on_action(cx.listener(|this, _: &FormatDocument, window, cx| {
+                this.format_document(window, cx);
+            }))
+            // Git: source-control panel actions.
+            .on_action(cx.listener(|this, _: &GitRefresh, _, cx| {
+                this.git_refresh(cx);
+            }))
+            .on_action(cx.listener(|this, _: &GitStageAll, _, cx| {
+                this.git_stage_all(cx);
+            }))
+            .on_action(cx.listener(|this, _: &GitUnstageAll, _, cx| {
+                this.git_unstage_all(cx);
+            }))
+            .on_action(cx.listener(|this, _: &GitDiscardAll, _, cx| {
+                this.git_discard_all(cx);
+            }))
+            .on_action(cx.listener(|this, action: &GitStageFile, _, cx| {
+                this.git_stage_path(&action.path, cx);
+            }))
+            .on_action(cx.listener(|this, action: &GitUnstageFile, _, cx| {
+                this.git_unstage_path(&action.path, cx);
+            }))
+            .on_action(cx.listener(|this, action: &GitDiscardFile, _, cx| {
+                this.git_discard_path(&action.path, cx);
+            }))
+            .on_action(cx.listener(|this, action: &GitOpenDiff, _, cx| {
+                this.open_diff(&action.path, cx);
+            }))
+            .on_action(cx.listener(|this, action: &GitOpenFile, window, cx| {
+                this.open_file(action.path.clone(), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &GitCommit, window, cx| {
+                this.git_commit(window, cx);
+            }))
             // Zed-style key context for workspace-level bindings. Note: do NOT
             // put `track_focus` on this full-window div — its hitbox breaks
             // the platform's client-decoration hit-testing, which kills
@@ -208,7 +260,7 @@ impl Render for Workspace {
                     .w_full()
                     .min_h(px(0.0))
                     .child(ui::activity_bar::render_activity_bar(
-                        activity, show_sidebar, &t, cx,
+                        activity, show_sidebar, git_changes, &t, cx,
                     ))
                     // Sidebar: fixed pixel width, resized by dragging the thin
                     // divider next to it. Not affected by window resize/maximize.
@@ -235,7 +287,13 @@ impl Render for Workspace {
                                         None => ui::welcome::render_no_folder_panel(&t, cx),
                                     },
                                     Activity::Search => ui::sidebar::search::render_search_panel(&t),
-                                    Activity::Git => ui::sidebar::git::render_git_panel(&t),
+                                    Activity::Git => ui::sidebar::git::render_git_panel(
+                                        git_commit_input.as_ref(),
+                                        git_repo,
+                                        &t,
+                                        window,
+                                        cx,
+                                    ),
                                     Activity::Extensions => {
                                         ui::sidebar::extensions::render_extensions_panel(&t)
                                     }
@@ -268,7 +326,11 @@ impl Render for Workspace {
                                     .when(welcome, |d| d.child(ui::welcome::render_welcome(&t, cx)))
                                     .when(!welcome, |d| {
                                         if is_settings {
-                                            d.child(ui::settings::render_settings(&t, theme_ix, font_size, cx))
+                                            d.child(ui::settings::render_settings(&self.settings, &t, theme_ix, font_size, cx))
+                                        } else if let Some(diff) = active_diff {
+                                            d.child(ui::diff::render_diff_view(
+                                                diff, font_size, &t, cx,
+                                            ))
                                         } else if let Some(editor) = editor {
                                             d.child(
                                                 div()
@@ -307,7 +369,15 @@ impl Render for Workspace {
                             }),
                     ),
             )
-            .child(ui::status_bar::render_status_bar(status, theme_name, &t))
+            .child(ui::status_bar::render_status_bar(
+                status,
+                theme_name,
+                git_branch.as_deref(),
+                git_changes,
+                lang_label,
+                lsp_ready,
+                &t,
+            ))
             // While a panel divider is being dragged, capture ALL mouse
             // movement with a transparent full-window overlay. Without this
             // the drag would freeze as soon as the cursor leaves the thin

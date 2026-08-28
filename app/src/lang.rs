@@ -1,5 +1,12 @@
-//! Language identification for open buffers plus LSP metadata shown in the
-//! status bar.
+//! Language identification for open buffers plus LSP server selection.
+//!
+//! `language_for` returns the tree-sitter language id used by the highlighter
+//! (gpui-component's `LanguageRegistry` — see its `Language` enum for the
+//! exact id list) and by the LSP layer. Detection is extension + filename
+//! based, with a shebang fallback for extension-less scripts.
+//!
+//! `lsp_binary_for` maps a language to the language server binary Zed uses by
+//! default for that language; the binary is looked up on `PATH` at runtime.
 
 use std::path::Path;
 
@@ -14,48 +21,116 @@ pub fn language_for(path: &Path) -> Option<&'static str> {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     match name {
         "Dockerfile" | "Containerfile" => return Some("dockerfile"),
-        "Makefile" => return Some("make"),
+        "Makefile" | "makefile" | "GNUmakefile" => return Some("make"),
+        "CMakeLists.txt" => return Some("cmake"),
+        "Justfile" | "justfile" => return Some("make"),
+        ".bashrc" | ".bash_profile" | ".zshrc" | ".profile" => return Some("bash"),
         _ => {}
     }
-    Some(match ext.as_str() {
+    if let Some(lang) = by_extension(&ext) {
+        return Some(lang);
+    }
+    // Extension-less scripts: sniff the shebang from the first line.
+    shebang_language(path)
+}
+
+fn by_extension(ext: &str) -> Option<&'static str> {
+    Some(match ext {
         "rs" => "rust",
         "js" | "mjs" | "cjs" | "jsx" => "javascript",
-        "ts" | "tsx" => "typescript",
-        "py" => "python",
-        "html" | "htm" => "html",
+        "ts" | "mts" | "cts" => "typescript",
+        "tsx" => "tsx",
+        "py" | "pyw" => "python",
+        "html" | "htm" | "xhtml" => "html",
         "css" => "css",
+        "scss" | "sass" => "css",
         "json" => "json",
+        "jsonc" => "json",
         "toml" => "toml",
         "yaml" | "yml" => "yaml",
-        "md" | "markdown" => "markdown",
+        "md" | "markdown" | "mdown" => "markdown",
         "go" => "go",
         "c" | "h" => "c",
-        "cpp" | "cc" | "hpp" => "cpp",
+        "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" | "inl" => "cpp",
+        "cs" => "csharp",
         "java" => "java",
         "rb" => "ruby",
-        "sh" | "bash" => "bash",
+        "sh" | "bash" | "zsh" => "bash",
         "php" => "php",
         "swift" => "swift",
-        "kt" => "kotlin",
-        "scala" => "scala",
+        "kt" | "kts" => "kotlin",
+        "scala" | "sc" => "scala",
         "lua" => "lua",
         "zig" => "zig",
-        "cs" => "c-sharp",
         "sql" => "sql",
         "r" => "r",
-        "xml" => "xml",
+        "xml" | "xsl" | "xsd" | "svg" => "xml",
+        "proto" => "proto",
+        "graphql" | "gql" => "graphql",
+        "ex" | "exs" => "elixir",
+        "ejs" => "ejs",
+        "erb" => "erb",
+        "diff" | "patch" => "diff",
+        "cmake" => "cmake",
+        "vue" | "svelte" | "astro" => "html",
+        "tex" => "latex",
+        "dart" => "dart",
+        "hs" => "haskell",
+        "ml" => "ocaml",
+        "fs" | "fsx" => "fsharp",
+        "erl" => "erlang",
+        "clj" | "cljs" => "clojure",
+        "ps1" | "psm1" => "powershell",
         _ => return None,
     })
 }
 
+/// Detect the language of an extension-less file from its `#!` shebang.
+fn shebang_language(path: &Path) -> Option<&'static str> {
+    let Ok(content) = std::fs::read(path) else {
+        return None;
+    };
+    let head = content.get(..256)?;
+    if head.len() < 2 || head[0] != b'#' || head[1] != b'!' {
+        return None;
+    }
+    let line = String::from_utf8_lossy(head).lines().next()?.to_string();
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("python") {
+        Some("python")
+    } else if lower.contains("ruby") {
+        Some("ruby")
+    } else if lower.contains("node") || lower.contains("deno") || lower.contains("bun") {
+        Some("javascript")
+    } else if lower.contains("bash") || lower.contains("sh") || lower.contains("zsh") {
+        Some("bash")
+    } else if lower.contains("perl") {
+        Some("perl")
+    } else if lower.contains("php") {
+        Some("php")
+    } else if lower.contains("lua") {
+        Some("lua")
+    } else if lower.contains("elixir") {
+        Some("elixir")
+    } else if lower.contains("swift") {
+        Some("swift")
+    } else if lower.contains("go") && line.contains("go run") {
+        Some("go")
+    } else {
+        None
+    }
+}
+
 /// The language server binary Zed uses by default for this language.
+/// (The `--stdio` / `start` flags live in the LSP spawner.)
 pub fn lsp_binary_for(lang: &str) -> Option<&'static str> {
     Some(match lang {
         "rust" => "rust-analyzer",
         "go" => "gopls",
         "python" => "basedpyright-langserver",
         "c" | "cpp" => "clangd",
-        "javascript" | "typescript" => "typescript-language-server",
+        "csharp" => "omnisharp",
+        "javascript" | "typescript" | "tsx" => "typescript-language-server",
         "lua" => "lua-language-server",
         "zig" => "zls",
         "ruby" => "ruby-lsp",
@@ -63,41 +138,128 @@ pub fn lsp_binary_for(lang: &str) -> Option<&'static str> {
         "php" => "intelephense",
         "bash" => "bash-language-server",
         "yaml" => "yaml-language-server",
+        "json" => "vscode-json-language-server",
+        "html" => "vscode-html-language-server",
+        "css" | "scss" => "vscode-css-language-server",
+        "markdown" => "marksman",
+        "toml" => "taplo",
+        "sql" => "sql-language-server",
+        "cmake" => "cmake-language-server",
+        "dockerfile" => "dockerfile-language-server-nodejs",
+        "graphql" => "graphql-language-service-cli",
+        "elixir" => "elixir-ls",
+        "swift" => "sourcekit-lsp",
+        "scala" => "metals",
+        "dart" => "dart",
+        "kotlin" => "kotlin-language-server",
         _ => return None,
     })
 }
 
-/// Human-readable LSP availability for the status bar.
-pub fn lsp_status(path: &Path) -> String {
-    let Some(lang) = language_for(path) else {
-        return "plain text".into();
-    };
-    match lsp_binary_for(lang) {
-        Some(bin) if binary_on_path(bin) => format!("{lang} · LSP ready ({bin})"),
-        Some(bin) => format!("{lang} · LSP server '{bin}' not found on PATH"),
-        None => format!("{lang} · no default LSP"),
-    }
-}
+const TSX_HIGHLIGHT_QUERY: &str = r#"
+; Types & Variables
+(identifier) @variable
 
-fn binary_on_path(binary: &str) -> bool {
-    // Windows executables come in several flavors; npm global installs
-    // create .cmd shims (never .exe), so all of them must be probed.
-    const WINDOWS_EXTS: [&str; 3] = [".exe", ".cmd", ".bat"];
-    let candidates: Vec<String> = if cfg!(windows) && !WINDOWS_EXTS.iter().any(|e| binary.ends_with(e))
-    {
-        WINDOWS_EXTS.iter().map(|e| format!("{binary}{e}")).collect()
-    } else {
-        vec![binary.to_string()]
-    };
-    std::env::var_os("PATH")
-        .map(|paths| {
-            std::env::split_paths(&paths).any(|dir| {
-                candidates
-                    .iter()
-                    .any(|name| dir.join(name).is_file())
-            })
-        })
-        .unwrap_or(false)
+; Properties
+(property_identifier) @property
+(shorthand_property_identifier) @property
+(shorthand_property_identifier_pattern) @property
+(private_property_identifier) @property
+
+; Function and method definitions
+(function_expression name: (identifier) @function)
+(function_declaration name: (identifier) @function)
+(method_definition name: (property_identifier) @function)
+(pair
+  key: (property_identifier) @function
+  value: [(function_expression) (arrow_function)])
+(assignment_expression
+  left: (member_expression property: (property_identifier) @function)
+  right: [(function_expression) (arrow_function)])
+(variable_declarator
+  name: (identifier) @function
+  value: [(function_expression) (arrow_function)])
+(assignment_expression
+  left: (identifier) @function
+  right: [(function_expression) (arrow_function)])
+
+; Function and method calls
+(call_expression function: (identifier) @function)
+(call_expression
+  function: (member_expression property: (property_identifier) @function))
+
+; Special identifiers
+((identifier) @type (#match? @type "^[A-Z]"))
+([
+  (identifier)
+  (shorthand_property_identifier)
+  (shorthand_property_identifier_pattern)
+ ] @constant (#match? @constant "^_*[A-Z_][A-Z\\d_]*$"))
+
+((identifier) @variable
+ (#match? @variable "^(arguments|module|console|window|document|process)$"))
+
+; Literals
+(this) @variable
+(super) @variable
+[(true) (false) (null) (undefined)] @constant
+
+(comment) @comment
+
+[(string) (template_string)] @string
+(regex) @string.special
+(number) @number
+
+; JSX Elements & Attributes
+(jsx_opening_element name: (_) @tag)
+(jsx_closing_element name: (_) @tag)
+(jsx_self_closing_element name: (_) @tag)
+(jsx_attribute (property_identifier) @attribute)
+
+; Punctuation & Delimiters
+[";" (optional_chain) "." ","] @punctuation.delimiter
+["-" "--" "-=" "+" "++" "+=" "*" "*=" "**" "**=" "/" "/=" "%" "%="
+ "<" "<=" "<<" "<<=" "=" "==" "===" "!" "!=" "!==" "=>"
+ ">" ">=" ">>" ">>=" ">>>" ">>>=" "~" "^" "&" "|" "^=" "&=" "|="
+ "&&" "||" "??" "&&=" "||=" "??="] @operator
+
+["(" ")" "[" "]" "{" "}"] @punctuation.bracket
+(template_substitution "${" @punctuation.special "}" @punctuation.special) @embedded
+
+; Keywords
+[
+  "as" "async" "await" "break" "case" "catch" "class" "const"
+  "continue" "debugger" "default" "delete" "do" "else" "export"
+  "extends" "finally" "for" "from" "function" "get" "if" "import"
+  "in" "instanceof" "let" "new" "of" "return" "set" "static"
+  "switch" "target" "throw" "try" "typeof" "var" "void" "while"
+  "with" "yield" "abstract" "declare" "enum" "implements"
+  "interface" "keyof" "namespace" "private" "protected" "public"
+  "type" "readonly" "override" "satisfies"
+] @keyword
+
+; Types
+(type_identifier) @type
+(predefined_type) @type
+(type_arguments "<" @punctuation.bracket ">" @punctuation.bracket)
+(required_parameter (identifier) @variable)
+(optional_parameter (identifier) @variable)
+"#;
+
+/// Initializes and registers high-quality Tree-Sitter language definitions for TSX/TypeScript/JSX.
+pub fn init_languages() {
+    use gpui_component::highlighter::{LanguageConfig, LanguageRegistry};
+    let registry = LanguageRegistry::singleton();
+
+    let tsx_config = LanguageConfig::new(
+        "tsx",
+        tree_sitter_typescript::LANGUAGE_TSX.into(),
+        vec!["html".into(), "css".into(), "javascript".into(), "typescript".into()],
+        TSX_HIGHLIGHT_QUERY,
+        "",
+        tree_sitter_typescript::LOCALS_QUERY,
+    );
+    registry.register("tsx", &tsx_config);
 }
 
 #[cfg(test)]
@@ -105,10 +267,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn detects_binaries_on_path() {
-        // A shell is present on every dev machine.
-        let shell = if cfg!(windows) { "cmd" } else { "sh" };
-        assert!(binary_on_path(shell));
-        assert!(!binary_on_path("definitely-not-a-binary-xyz"));
+    fn detects_extensions() {
+        assert_eq!(language_for(Path::new("main.rs")), Some("rust"));
+        assert_eq!(language_for(Path::new("app.tsx")), Some("tsx"));
+        assert_eq!(language_for(Path::new("x.cs")), Some("csharp"));
+        assert_eq!(language_for(Path::new("Dockerfile")), Some("dockerfile"));
+        assert_eq!(language_for(Path::new("CMakeLists.txt")), Some("cmake"));
+        assert_eq!(language_for(Path::new("Makefile")), Some("make"));
+        assert_eq!(language_for(Path::new("unknown.xyz")), None);
+    }
+
+    #[test]
+    fn test_init_languages() {
+        init_languages();
+        let registry = gpui_component::highlighter::LanguageRegistry::singleton();
+        assert!(registry.language("tsx").is_some());
     }
 }

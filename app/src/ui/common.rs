@@ -44,7 +44,7 @@ pub(crate) fn mock_input(text: &'static str, h: f32, t: &Colors) -> Div {
 }
 
 /// Collapsible section title strip ("CHANGES", "INSTALLED", …).
-pub(crate) fn section_strip(label: &'static str, t: &Colors) -> Div {
+pub(crate) fn section_strip(label: &str, t: &Colors) -> Div {
     div()
         .h(px(22.0))
         .px(px(12.0))
@@ -55,5 +55,5 @@ pub(crate) fn section_strip(label: &'static str, t: &Colors) -> Div {
         .text_size(px(11.0))
         .font_weight(FontWeight::BOLD)
         .text_color(rgba(t.text))
-        .child(SharedString::from(label))
+        .child(SharedString::from(label.to_string()))
 }

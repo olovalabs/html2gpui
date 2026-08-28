@@ -11,11 +11,13 @@ use gpui::{
 };
 use gpui_component::scroll::ScrollableElement;
 
+use crate::settings::{AutoSaveMode, Settings};
 use crate::theme::{self, Colors};
 use crate::workspace::Workspace;
 
 /// Render the VS Code-style settings interface
 pub(crate) fn render_settings(
+    settings: &Settings,
     t: &Colors,
     active_theme_ix: usize,
     font_size: f32,
@@ -32,7 +34,7 @@ pub(crate) fn render_settings(
         .flex_col()
         .overflow_hidden()
         // Top Header bar
-        .child(render_header(t))
+        .child(render_header(t, cx))
         // Scrollable content area
         .child(
             div()
@@ -52,7 +54,7 @@ pub(crate) fn render_settings(
                         // Section 1: Themes (Primary feature)
                         .child(render_theme_section(t, active_theme_ix, cx))
                         // Section 2: Editor settings
-                        .child(render_editor_section(t, font_size, cx))
+                        .child(render_editor_section(settings, t, font_size, cx))
                         // Section 3: Terminal settings
                         .child(render_terminal_section(t, cx))
                         // Section 4: Files & System
@@ -61,8 +63,9 @@ pub(crate) fn render_settings(
         )
 }
 
-/// Header with Title and Search/Category badges
-fn render_header(t: &Colors) -> impl IntoElement {
+/// Header with Title, Settings path, and Open Settings (JSON) button
+fn render_header(t: &Colors, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let settings_path_display = crate::settings::settings_file_path().to_string_lossy().into_owned();
     div()
         .w_full()
         .px(px(32.0))
@@ -71,35 +74,72 @@ fn render_header(t: &Colors) -> impl IntoElement {
         .border_b_1()
         .border_color(rgba(t.border_variant))
         .flex()
-        .flex_col()
-        .gap(px(10.0))
+        .flex_row()
+        .items_center()
+        .justify_between()
         .child(
             div()
                 .flex()
-                .items_center()
-                .gap(px(10.0))
+                .flex_col()
+                .gap(px(4.0))
                 .child(
-                    svg()
-                        .path("ui_icons/settings-gear_tint.svg")
-                        .w(px(22.0))
-                        .h(px(22.0))
-                        .text_color(rgba(t.text_accent)),
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.0))
+                        .child(
+                            svg()
+                                .path("ui_icons/settings-gear_tint.svg")
+                                .w(px(22.0))
+                                .h(px(22.0))
+                                .text_color(rgba(t.text_accent)),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(20.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgba(t.text))
+                                .child(SharedString::from("Settings")),
+                        ),
                 )
                 .child(
                     div()
-                        .text_size(px(20.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgba(t.text))
-                        .child(SharedString::from("Settings")),
+                        .text_size(px(12.0))
+                        .text_color(rgba(t.text_muted))
+                        .child(SharedString::from(format!("Stored in {settings_path_display}"))),
                 ),
         )
         .child(
             div()
-                .text_size(px(13.0))
-                .text_color(rgba(t.text_muted))
-                .child(SharedString::from(
-                    "Manage preferences, color themes, editor fonts and workbench configuration",
-                )),
+                .id("open-settings-json-btn")
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .px(px(12.0))
+                .py(px(6.0))
+                .rounded(px(4.0))
+                .bg(rgba(t.element_bg))
+                .border_1()
+                .border_color(rgba(t.border))
+                .cursor_pointer()
+                .hover(|s| s.bg(rgba(t.element_hover)).border_color(rgba(t.border_focused)))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.open_settings_json(window, cx);
+                }))
+                .child(
+                    svg()
+                        .path("ui_icons/file-code_tint.svg")
+                        .w(px(14.0))
+                        .h(px(14.0))
+                        .text_color(rgba(t.text_accent)),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgba(t.text))
+                        .child(SharedString::from("Open Settings (JSON)")),
+                ),
         )
 }
 
@@ -302,10 +342,15 @@ fn color_swatch(color_hex: u32, _label: &'static str, t: &Colors) -> impl IntoEl
 
 /// Section 2: Text Editor Settings
 fn render_editor_section(
+    settings: &Settings,
     t: &Colors,
     font_size: f32,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
+    let auto_save = settings.editor_auto_save;
+    let auto_save_delay = settings.editor_auto_save_delay;
+    let tab_size = settings.editor_tab_size;
+
     div()
         .flex()
         .flex_col()
@@ -320,14 +365,14 @@ fn render_editor_section(
                         .text_size(px(16.0))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(rgba(t.text))
-                        .child(SharedString::from("📝 Text Editor")),
+                        .child(SharedString::from("📝 Text Editor & Auto Save")),
                 )
                 .child(
                     div()
                         .text_size(px(12.5))
                         .text_color(rgba(t.text_muted))
                         .child(SharedString::from(
-                            "Font configuration, indentation and code editor preferences",
+                            "Auto-save triggers, font configuration, indentation and editor preferences",
                         )),
                 ),
         )
@@ -336,6 +381,123 @@ fn render_editor_section(
                 .flex()
                 .flex_col()
                 .gap(px(10.0))
+                // Auto Save Mode
+                .child(
+                    setting_row(
+                        "Files: Auto Save",
+                        auto_save.description(),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(
+                                btn_pill(
+                                    "autosave-off",
+                                    "off",
+                                    auto_save == AutoSaveMode::Off,
+                                    t,
+                                    cx.listener(|this, _, _, cx| {
+                                        this.settings.editor_auto_save = AutoSaveMode::Off;
+                                        let _ = this.settings.save();
+                                        cx.notify();
+                                    }),
+                                ),
+                            )
+                            .child(
+                                btn_pill(
+                                    "autosave-after-delay",
+                                    "afterDelay",
+                                    auto_save == AutoSaveMode::AfterDelay,
+                                    t,
+                                    cx.listener(|this, _, _, cx| {
+                                        this.settings.editor_auto_save = AutoSaveMode::AfterDelay;
+                                        let _ = this.settings.save();
+                                        cx.notify();
+                                    }),
+                                ),
+                            )
+                            .child(
+                                btn_pill(
+                                    "autosave-on-focus-change",
+                                    "onFocusChange",
+                                    auto_save == AutoSaveMode::OnFocusChange,
+                                    t,
+                                    cx.listener(|this, _, _, cx| {
+                                        this.settings.editor_auto_save = AutoSaveMode::OnFocusChange;
+                                        let _ = this.settings.save();
+                                        cx.notify();
+                                    }),
+                                ),
+                            ),
+                        t,
+                    ),
+                )
+                // Auto Save Delay (only visible/active when afterDelay is selected)
+                .when(auto_save == AutoSaveMode::AfterDelay, |d| {
+                    d.child(
+                        setting_row(
+                            "Files: Auto Save Delay",
+                            "Controls the delay in milliseconds after which a dirty file is saved automatically",
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .child(
+                                    btn_pill(
+                                        "delay-500",
+                                        "500ms",
+                                        auto_save_delay == 500,
+                                        t,
+                                        cx.listener(|this, _, _, cx| {
+                                            this.settings.editor_auto_save_delay = 500;
+                                            let _ = this.settings.save();
+                                            cx.notify();
+                                        }),
+                                    ),
+                                )
+                                .child(
+                                    btn_pill(
+                                        "delay-1000",
+                                        "1000ms (1s)",
+                                        auto_save_delay == 1000,
+                                        t,
+                                        cx.listener(|this, _, _, cx| {
+                                            this.settings.editor_auto_save_delay = 1000;
+                                            let _ = this.settings.save();
+                                            cx.notify();
+                                        }),
+                                    ),
+                                )
+                                .child(
+                                    btn_pill(
+                                        "delay-2000",
+                                        "2000ms (2s)",
+                                        auto_save_delay == 2000,
+                                        t,
+                                        cx.listener(|this, _, _, cx| {
+                                            this.settings.editor_auto_save_delay = 2000;
+                                            let _ = this.settings.save();
+                                            cx.notify();
+                                        }),
+                                    ),
+                                )
+                                .child(
+                                    btn_pill(
+                                        "delay-5000",
+                                        "5000ms (5s)",
+                                        auto_save_delay == 5000,
+                                        t,
+                                        cx.listener(|this, _, _, cx| {
+                                            this.settings.editor_auto_save_delay = 5000;
+                                            let _ = this.settings.save();
+                                            cx.notify();
+                                        }),
+                                    ),
+                                ),
+                            t,
+                        ),
+                    )
+                })
                 // Font size item
                 .child(
                     setting_row(
@@ -378,15 +540,48 @@ fn render_editor_section(
                         "Editor: Tab Size",
                         "The number of spaces a tab is equal to in code files",
                         div()
-                            .px(px(10.0))
-                            .py(px(4.0))
-                            .rounded(px(4.0))
-                            .bg(rgba(t.element_bg))
-                            .border_1()
-                            .border_color(rgba(t.border))
-                            .text_size(px(12.5))
-                            .text_color(rgba(t.text))
-                            .child(SharedString::from("4 spaces")),
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(
+                                btn_pill(
+                                    "tab-size-2",
+                                    "2 spaces",
+                                    tab_size == 2,
+                                    t,
+                                    cx.listener(|this, _, _, cx| {
+                                        this.settings.editor_tab_size = 2;
+                                        let _ = this.settings.save();
+                                        cx.notify();
+                                    }),
+                                ),
+                            )
+                            .child(
+                                btn_pill(
+                                    "tab-size-4",
+                                    "4 spaces",
+                                    tab_size == 4,
+                                    t,
+                                    cx.listener(|this, _, _, cx| {
+                                        this.settings.editor_tab_size = 4;
+                                        let _ = this.settings.save();
+                                        cx.notify();
+                                    }),
+                                ),
+                            )
+                            .child(
+                                btn_pill(
+                                    "tab-size-8",
+                                    "8 spaces",
+                                    tab_size == 8,
+                                    t,
+                                    cx.listener(|this, _, _, cx| {
+                                        this.settings.editor_tab_size = 8;
+                                        let _ = this.settings.save();
+                                        cx.notify();
+                                    }),
+                                ),
+                            ),
                         t,
                     ),
                 )
@@ -617,3 +812,40 @@ fn btn_small(
         .child(SharedString::from(label))
         .on_click(on_click)
 }
+
+fn btn_pill(
+    id: &'static str,
+    label: &'static str,
+    is_active: bool,
+    t: &Colors,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .px(px(10.0))
+        .py(px(4.0))
+        .rounded(px(4.0))
+        .cursor_pointer()
+        .text_size(px(12.0))
+        .font_weight(if is_active {
+            FontWeight::BOLD
+        } else {
+            FontWeight::NORMAL
+        })
+        .when(is_active, |d| {
+            d.bg(rgba(t.border_focused))
+                .text_color(rgba(t.background))
+                .border_1()
+                .border_color(rgba(t.border_focused))
+        })
+        .when(!is_active, |d| {
+            d.bg(rgba(t.element_bg))
+                .text_color(rgba(t.text))
+                .border_1()
+                .border_color(rgba(t.border))
+                .hover(|s| s.bg(rgba(t.element_hover)).border_color(rgba(t.border_focused)))
+        })
+        .child(SharedString::from(label))
+        .on_click(on_click)
+}
+

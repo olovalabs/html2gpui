@@ -8,6 +8,7 @@ use crate::workspace::{Activity, Workspace};
 pub(crate) fn render_activity_bar(
     activity: Activity,
     show_sidebar: bool,
+    git_change_count: usize,
     t: &crate::theme::Colors,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
@@ -50,7 +51,8 @@ pub(crate) fn render_activity_bar(
                     "act-git",
                     "ui_icons/source-control_tint.svg",
                     show_sidebar && activity == Activity::Git,
-                    Some("3"),
+                    // Real change count (VS Code style badge); hidden at zero.
+                    (git_change_count > 0).then(|| git_change_count.to_string()),
                     Activity::Git,
                     t,
                     cx,
@@ -88,7 +90,7 @@ fn activity_icon(
     id: &'static str,
     svg_path: &'static str,
     selected: bool,
-    badge: Option<&'static str>,
+    badge: Option<String>,
     which: Activity,
     t: &crate::theme::Colors,
     cx: &mut Context<Workspace>,
@@ -158,7 +160,9 @@ fn activity_icon(
         .justify_center()
         .cursor_pointer()
         .child(inner)
-        .on_click(cx.listener(move |this, _, _, cx| this.toggle_activity(which, cx)))
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.toggle_activity(which, window, cx)
+        }))
 }
 
 fn activity_static_icon(
