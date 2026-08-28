@@ -187,9 +187,10 @@ impl Render for Workspace {
                                 group.child(
                                     resizable_panel()
                                         .size(px(300.0))
-                                        // Keep the sidebar at the VS Code-like width even
-                                        // when the window is maximized or resized.
-                                        .size_range(px(170.0)..px(300.0))
+                                        // VS Code-like resizing: default 300px,
+                                        // draggable from a narrow strip up to a
+                                        // wide panel instead of being capped.
+                                        .size_range(px(170.0)..px(800.0))
                                         .child(match activity {
                                             Activity::Explorer => match &root_opt {
                                                 Some(root) => ui::sidebar::explorer::render_tree(
