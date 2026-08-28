@@ -52,6 +52,7 @@ impl Render for Workspace {
         let max_terminal = f32::from(window.viewport_size().height - px(220.0)).max(120.0);
         self.terminal_height = self.terminal_height.clamp(80.0, max_terminal);
         let terminal_h = self.terminal_height;
+        let panel_resize = self.panel_resize;
         
         // Tab-related data
         let tabs = self.tabs.clone();
@@ -163,40 +164,6 @@ impl Render for Workspace {
             // title-bar dragging on Windows. The focus target lives on the
             // tiny `workspace-focus-catcher` element below instead.
             .key_context("Workspace")
-            // Panel resize drags (sidebar width / terminal height): the
-            // move/up listeners live on the root div so the drag keeps
-            // working when the cursor moves fast off the thin handle.
-            .on_mouse_move(cx.listener(
-                |this, ev: &MouseMoveEvent, window, cx| {
-                    let Some(rz) = this.panel_resize else {
-                        return;
-                    };
-                    match rz.kind {
-                        ResizeKind::Sidebar => {
-                            let max = f32::from(window.viewport_size().width - px(320.0)).max(220.0);
-                            this.sidebar_width =
-                                (rz.start_size + (f32::from(ev.position.x) - rz.start_mouse))
-                                    .clamp(170.0, max);
-                        }
-                        ResizeKind::Terminal => {
-                            let max =
-                                f32::from(window.viewport_size().height - px(220.0)).max(120.0);
-                            this.terminal_height =
-                                (rz.start_size - (f32::from(ev.position.y) - rz.start_mouse))
-                                    .clamp(80.0, max);
-                        }
-                    }
-                    cx.stop_propagation();
-                    cx.notify();
-                },
-            ))
-            .on_mouse_up(MouseButton::Left, cx.listener(
-                |this, _: &MouseUpEvent, _, cx| {
-                    if this.panel_resize.take().is_some() {
-                        cx.notify();
-                    }
-                },
-            ))
             // Invisible 1x1 focus target: when no editor or terminal is
             // focused, the workspace holds focus here so global keybindings
             // always have a dispatch path (Zed keeps an equivalent workspace
@@ -317,6 +284,62 @@ impl Render for Workspace {
                     ),
             )
             .child(ui::status_bar::render_status_bar(&status, &theme_name, &t))
+            // While a panel divider is being dragged, capture ALL mouse
+            // movement with a transparent full-window overlay. Without this
+            // the drag would freeze as soon as the cursor leaves the thin
+            // divider or crosses a mouse-blocking element (editor input,
+            // terminal, ...), because div listeners only fire while their
+            // own hitbox is hovered.
+            .when(panel_resize.is_some(), |root| {
+                let kind = panel_resize.unwrap().kind;
+                let overlay = div()
+                    .id("panel-resize-overlay")
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .occlude()
+                    .on_mouse_move(cx.listener(
+                        |this, ev: &MouseMoveEvent, window, cx| {
+                            let Some(rz) = this.panel_resize else {
+                                return;
+                            };
+                            match rz.kind {
+                                ResizeKind::Sidebar => {
+                                    let max =
+                                        f32::from(window.viewport_size().width - px(320.0))
+                                            .max(220.0);
+                                    this.sidebar_width = (rz.start_size
+                                        + (f32::from(ev.position.x) - rz.start_mouse))
+                                        .clamp(170.0, max);
+                                }
+                                ResizeKind::Terminal => {
+                                    let max =
+                                        f32::from(window.viewport_size().height - px(220.0))
+                                            .max(120.0);
+                                    this.terminal_height = (rz.start_size
+                                        - (f32::from(ev.position.y) - rz.start_mouse))
+                                        .clamp(80.0, max);
+                                }
+                            }
+                            cx.stop_propagation();
+                            cx.notify();
+                        },
+                    ))
+                    .on_mouse_up(MouseButton::Left, cx.listener(
+                        |this, _: &MouseUpEvent, _, cx| {
+                            if this.panel_resize.take().is_some() {
+                                cx.notify();
+                            }
+                        },
+                    ));
+                let overlay = if kind == ResizeKind::Sidebar {
+                    overlay.cursor_col_resize()
+                } else {
+                    overlay.cursor_row_resize()
+                };
+                root.child(overlay)
+            })
     }
 }
 
