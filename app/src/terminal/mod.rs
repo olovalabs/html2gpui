@@ -168,7 +168,7 @@ pub fn render_terminal(
                         .text_color(rgba(t.text_muted))
                         .child("×")
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            this.hide_terminal(window, cx);
+                            this.close_terminal(window, cx);
                         })),
                 ),
         )

@@ -397,6 +397,21 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Close the terminal panel AND terminate its shell process/session (VS
+    /// Code close-button behavior). Drops the terminal entity, which closes
+    /// the PTY and kills the child shell; the next Ctrl+` starts a fresh shell.
+    /// Unlike [`Self::hide_terminal`] (panel toggle, session kept alive), this
+    /// fully exits the terminal.
+    pub(crate) fn close_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_terminal = false;
+        // Dropping the entity tears down the terminal view and closes the PTY
+        // master, which terminates the running shell process.
+        self.terminal.take();
+        self.status = "Terminal closed".into();
+        self.focus_active_editor_or_self(window, cx);
+        cx.notify();
+    }
+
     /// Focus the active tab's editor, falling back to the workspace focus
     /// handle when no editor is open. Keeps the dispatch path alive for
     /// global keybindings at all times.

@@ -16,6 +16,13 @@ use crate::workspace::CreatingKind;
 
 use super::{Activity, PanelResizeDrag, ResizeKind, Workspace};
 
+/// Pixels of chrome reserved above/below the terminal so it can be dragged to
+/// (nearly) full height like VS Code's maximized panel: title bar (34) +
+/// status bar (26) + 5px drag handle + a 35px sliver so the tab/editor stay
+/// visible above the panel. Drag the divider up and the terminal swallows the
+/// whole editor region.
+const TERMINAL_MAX_RESERVE: f32 = 100.0;
+
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(path) = self.pending_open.take() {
@@ -49,7 +56,8 @@ impl Render for Workspace {
         let max_sidebar = f32::from(window.viewport_size().width - px(320.0)).max(220.0);
         self.sidebar_width = self.sidebar_width.clamp(170.0, max_sidebar);
         let sidebar_w = self.sidebar_width;
-        let max_terminal = f32::from(window.viewport_size().height - px(220.0)).max(120.0);
+        let max_terminal = f32::from(window.viewport_size().height - px(TERMINAL_MAX_RESERVE))
+            .max(120.0);
         self.terminal_height = self.terminal_height.clamp(80.0, max_terminal);
         let terminal_h = self.terminal_height;
         let panel_resize = self.panel_resize;
@@ -315,8 +323,10 @@ impl Render for Workspace {
                                 }
                                 ResizeKind::Terminal => {
                                     let max =
-                                        f32::from(window.viewport_size().height - px(220.0))
-                                            .max(120.0);
+                                        f32::from(
+                                            window.viewport_size().height - px(TERMINAL_MAX_RESERVE),
+                                        )
+                                        .max(120.0);
                                     this.terminal_height = (rz.start_size
                                         - (f32::from(ev.position.y) - rz.start_mouse))
                                         .clamp(80.0, max);
