@@ -1,29 +1,26 @@
-//! Tab bar component inspired by Zed's implementation.
-//! Provides VS Code-style tabs with proper positioning and click handling.
+//! Tab bar component with Dark Islands floating pill and top-accent active styling.
 
 use gpui::prelude::*;
-use gpui::{div, px, rgba, svg, Context, IntoElement};
-use crate::workspace::{OpenTab, Workspace};
+use gpui::{div, px, rgba, Context, FontWeight, IntoElement, SharedString};
+
+use crate::file_icons;
 use crate::theme::Colors;
+use crate::ui::common::icon_img;
+use crate::workspace::{OpenTab, Workspace};
 
 /// Tab bar height in pixels
 const TAB_HEIGHT: f32 = 36.0;
 
-/// Tab close button size
-const CLOSE_SIZE: f32 = 24.0;
-
-/// Renders a single tab with Zed-style positioning
+/// Renders a single tab matching the Dark Islands screenshot design
 fn render_tab_content(
     tab: &OpenTab,
     index: usize,
     is_active: bool,
-    is_first: bool,
-    is_last: bool,
     t: &Colors,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
     let label = if tab.is_settings {
-        "Settings".to_string()
+        "settings.json".to_string()
     } else {
         tab.path
             .as_ref()
@@ -35,127 +32,120 @@ fn render_tab_content(
             .unwrap_or_else(|| "Untitled".to_string())
     };
 
-    // Colors based on active state
-    let bg = if is_active { t.tab_active_bg } else { t.tab_inactive_bg };
-    let fg = if is_active { t.tab_active_fg } else { t.tab_inactive_fg };
+    let icon_path = if tab.is_settings {
+        "file_icons/file_type_json.svg"
+    } else if let Some(p) = &tab.path {
+        file_icons::icon_for(p)
+    } else {
+        "file_icons/default_file.svg"
+    };
 
-    // Build the base tab div with click handler for switching
+    let text_color = if is_active {
+        0xf59e0bff // Warm gold / orange for active tab text in Dark Islands
+    } else {
+        0x94a3b8ff // Muted slate for inactive tabs
+    };
+
     let mut tab_div = div()
         .id(("tab", index))
         .flex()
+        .flex_row()
         .items_center()
-        .h(px(TAB_HEIGHT))
-        .bg(rgba(bg))
+        .gap(px(6.0))
         .cursor_pointer()
-        .text_size(px(13.5))
-        .text_color(rgba(fg))
+        .text_size(px(13.0))
+        .text_color(rgba(text_color))
         .flex_shrink()
         .overflow_hidden()
         .on_click(cx.listener(move |this, _, _window, cx| {
-            // Directly set the active tab
             this.switch_tab_to(index, cx);
-        }))
-        .hover(|h| {
-            if !is_active {
-                h.bg(rgba(t.element_hover))
-            } else {
-                h
-            }
-        });
+        }));
 
-    // Apply borders based on position and state
-    if is_first && is_last {
-        // Single tab
-        if is_active {
-            tab_div = tab_div.border_b(px(2.0)).border_color(rgba(t.text_accent));
-        }
-    } else if is_first {
-        // First tab
-        if is_active {
-            tab_div = tab_div.border_b(px(2.0)).border_color(rgba(t.text_accent));
-        } else {
-            tab_div = tab_div.border_r(px(1.0)).border_color(rgba(t.border));
-        }
-    } else if is_last {
-        // Last tab
-        tab_div = tab_div.border_l(px(1.0)).border_color(rgba(t.border));
-        tab_div = tab_div.border_r(px(1.0)).border_color(rgba(t.border));
-        if is_active {
-            tab_div = tab_div.border_b(px(2.0)).border_color(rgba(t.text_accent));
-        }
+    if is_active {
+        tab_div = tab_div
+            .h(px(TAB_HEIGHT))
+            .bg(rgba(0x16181dff))
+            .border_t(px(2.0))
+            .border_color(rgba(0xff6f59ff)) // Coral / orange top accent line
+            .border_r_1()
+            .border_color(rgba(0x232731ff))
+            .border_l_1()
+            .border_color(rgba(0x232731ff))
+            .px(px(10.0));
     } else {
-        // Middle tab
-        tab_div = tab_div.border_l(px(1.0)).border_color(rgba(t.border));
-        tab_div = tab_div.border_r(px(1.0)).border_color(rgba(t.border));
-        if is_active {
-            tab_div = tab_div.border_b(px(2.0)).border_color(rgba(t.text_accent));
-        }
+        tab_div = tab_div
+            .h(px(26.0))
+            .my(px(5.0))
+            .mx(px(3.0))
+            .rounded(px(6.0))
+            .bg(rgba(0x16181dff))
+            .border_1()
+            .border_color(rgba(0x282c35ff))
+            .px(px(8.0))
+            .hover(|h| h.bg(rgba(0x1e222aff)));
     }
 
-    // Close button with its own click handler
-    let close_button = div()
+    // Close button
+    let mut close_btn = div()
         .id(("close-tab", index))
-        .w(px(CLOSE_SIZE))
-        .h(px(CLOSE_SIZE))
+        .size(px(18.0))
+        .rounded(px(4.0))
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(4.0))
         .flex_none()
         .cursor_pointer()
-        .opacity(0.6)
-        .hover(|h| h.opacity(1.0).bg(rgba(t.element_hover)).rounded(px(4.0)))
         .on_click(cx.listener(move |this, _, _window, cx| {
             this.close_tab_at_index(index, cx);
-        }))
-        .child(div().text_sm().text_color(rgba(fg)).child("×"));
+        }));
+
+    if !is_active {
+        close_btn = close_btn
+            .bg(rgba(0x232732ff))
+            .hover(|h| h.bg(rgba(0x353b49ff)));
+    } else {
+        close_btn = close_btn.hover(|h| h.bg(rgba(t.element_hover)));
+    }
+
+    close_btn = close_btn.child(
+        div()
+            .text_size(px(10.5))
+            .text_color(rgba(if is_active { 0xccccccff } else { 0x8b949eff }))
+            .child("✕"),
+    );
 
     let content = div()
         .flex()
         .flex_row()
         .items_center()
-        .h_full()
-        .px(px(10.0))
-        .gap_x(px(6.0))
+        .gap(px(6.0))
         .flex_1()
+        .min_w(px(0.0))
         .overflow_hidden()
-        .children([
-            // Dirty indicator
+        .child(icon_img(icon_path, 15.0))
+        .child(
             div()
-                .when(tab.dirty, |d| {
-                    d.w(px(8.0))
-                        .h(px(8.0))
-                        .rounded_full()
-                        .bg(rgba(t.text_accent))
-                        .flex_none()
-                })
-                .when(!tab.dirty, |d| d.w(px(0.0))),
-            // Icon if settings tab
-            div()
-                .when(tab.is_settings, |d| {
-                    d.child(
-                        svg()
-                            .path("ui_icons/settings-gear_tint.svg")
-                            .w(px(14.0))
-                            .h(px(14.0))
-                            .text_color(rgba(fg))
-                            .flex_none(),
-                    )
-                })
-                .when(!tab.is_settings, |d| d.w(px(0.0))),
-            // Tab label - italic for preview tabs (VS Code style)
-            div()
-                .flex_1()
                 .overflow_hidden()
                 .text_ellipsis()
                 .whitespace_nowrap()
-                .when(tab.preview, |d| d.italic())
-                .child(label),
-        ]);
+                .child(SharedString::from(label)),
+        );
+
+    let status_indicator = if tab.dirty {
+        div()
+            .text_size(px(11.0))
+            .font_weight(FontWeight::BOLD)
+            .text_color(rgba(0xf59e0bff))
+            .child("M")
+            .into_any_element()
+    } else {
+        div().into_any_element()
+    };
 
     tab_div
         .child(content)
-        .child(close_button)
+        .child(status_indicator)
+        .child(close_btn)
 }
 
 /// Renders the tab bar container
@@ -165,23 +155,20 @@ pub fn render_tab_bar(
     t: &Colors,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
-    let tab_count = tabs.len();
-
     div()
         .id("tab-bar")
         .flex()
         .flex_row()
+        .items_center()
         .h(px(TAB_HEIGHT))
-        .bg(rgba(t.tab_bar))
-        .border_b(px(1.0))
-        .border_color(rgba(t.border))
+        .bg(rgba(0x0e1014ff))
+        .border_b_1()
+        .border_color(rgba(0x232731ff))
         .w_full()
+        .px(px(4.0))
         .overflow_hidden()
         .children(tabs.iter().enumerate().map(|(idx, tab)| {
-            let is_first = idx == 0;
-            let is_last = idx == tab_count - 1;
             let is_active = idx == active_tab;
-
-            render_tab_content(tab, idx, is_active, is_first, is_last, t, cx)
+            render_tab_content(tab, idx, is_active, t, cx)
         }))
 }
