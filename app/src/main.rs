@@ -8,6 +8,7 @@ mod actions;
 mod assets;
 mod file_icons;
 mod fs_tree;
+mod git;
 mod lang;
 mod lsp;
 mod terminal;
@@ -61,7 +62,18 @@ fn main() {
                 KeyBinding::new("ctrl-_", DecreaseFontSize, None),
                 KeyBinding::new("ctrl-0", ResetFontSize, None),
                 KeyBinding::new("ctrl-alt-c", CopyDiagnostic, None),
+                // Format the current document with its language server
+                // (VS Code / Zed compatible).
+                KeyBinding::new("shift-alt-f", FormatDocument, Some("Workspace")),
             ]);
+            // Go to definition (F12, like VS Code). The editor library
+            // resolves definitions with a modifier-hover first and jumps on
+            // this action.
+            cx.bind_keys([KeyBinding::new(
+                "f12",
+                gpui_component::input::GoToDefinition,
+                Some("Input"),
+            )]);
 
             // Start on GitHub Dark and paint tree-sitter captures with the
             // theme's exact syntax palette from day one.

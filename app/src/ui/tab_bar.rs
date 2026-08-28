@@ -21,6 +21,13 @@ fn render_tab_content(
 ) -> impl IntoElement {
     let label = if tab.is_settings {
         "settings.json".to_string()
+    } else if let Some(diff) = &tab.diff {
+        let name = diff
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| diff.rel.clone());
+        format!("{name} — diff")
     } else {
         tab.path
             .as_ref()
@@ -34,6 +41,8 @@ fn render_tab_content(
 
     let icon_path = if tab.is_settings {
         "file_icons/file_type_json.svg"
+    } else if tab.diff.is_some() {
+        "file_icons/file_type_git.svg"
     } else if let Some(p) = &tab.path {
         file_icons::icon_for(p)
     } else {

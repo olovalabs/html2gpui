@@ -7,12 +7,14 @@ mod render;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use gpui::{AppContext, Context, Entity, FocusHandle, Window};
 use gpui_component::input::{InputEvent, InputState, TabSize};
 use notify::Watcher as _;
 
 use crate::fs_tree::{collapse_all, display_name, load_dir, reload_dir_preserving, TreeNode};
+use crate::git::{self, GitChange, RepoStatus};
 use crate::lang;
 use crate::lsp::{LspEvent, LspManager};
 use crate::theme;
@@ -30,6 +32,24 @@ pub struct OpenTab {
     pub preview: bool,
     /// True if this tab represents the VS Code Settings page
     pub is_settings: bool,
+    /// True when this tab is a Git diff view (of `diff.path`).
+    pub diff: Option<DiffTab>,
+}
+
+/// A Git diff view opened from the source-control panel. The raw unified
+/// diff text is produced on a background thread and cached here.
+#[derive(Clone)]
+pub(crate) struct DiffTab {
+    /// Absolute path of the changed file.
+    pub path: PathBuf,
+    /// Repo-relative path used for the git CLI.
+    pub rel: String,
+    /// True when the diff shows the staged (index) version.
+    pub staged: bool,
+    /// Cached unified-diff text, `None` while loading.
+    pub text: Option<String>,
+    /// Non-fatal load error (shown inside the diff view).
+    pub error: Option<String>,
 }
 
 /// Which sidebar panel is active.
@@ -121,6 +141,18 @@ pub(crate) struct Workspace {
     /// Active panel resize drag: which handle was grabbed, where the mouse
     /// was at grab time and how big the panel was.
     pub(crate) panel_resize: Option<PanelResizeDrag>,
+    /// Git repository state of the opened folder (`None` when it isn't a
+    /// git repository). Refreshed in the background by a polling thread.
+    pub(crate) git: Option<RepoStatus>,
+    /// Pokes the git polling thread to re-run `git status` immediately
+    /// (after saves, commits, staging, …).
+    pub(crate) git_poke_tx: Option<async_channel::Sender<()>>,
+    /// The commit-message input of the source-control panel (created lazily
+    /// when the panel is opened).
+    pub(crate) git_commit_input: Option<Entity<InputState>>,
+    /// Set by the commit input's Enter handler (which has no window handle);
+    /// render() runs the commit on the next frame, where the window exists.
+    pub(crate) git_commit_pending: bool,
 }
 
 /// Which divider is being dragged.
@@ -258,7 +290,19 @@ impl Workspace {
             sidebar_width: 300.0,
             terminal_height: 320.0,
             panel_resize: None,
+            git: None,
+            git_poke_tx: None,
+            git_commit_input: None,
+            git_commit_pending: false,
         }
+    }
+
+    /// The git change entry for an absolute path, if this workspace is a
+    /// git repository and the path is changed.
+    pub(crate) fn git_change_for(&self, path: &Path) -> Option<(PathBuf, GitChange)> {
+        let repo = self.git.as_ref()?;
+        let change = repo.changes.iter().find(|c| c.path == path).cloned()?;
+        Some((repo.root.clone(), change))
     }
 
     pub(crate) fn theme(&self) -> &'static theme::Theme {
@@ -280,6 +324,13 @@ impl Workspace {
                 match &self.root {
                     Some(_) => format!("{name}{star} — {}", self.root_display),
                     None => format!("{name}{star}"),
+                }
+            } else if let Some(diff) = &tab.diff {
+                let name = display_name(&diff.path);
+                let label = if diff.staged { " (staged diff)" } else { " (diff)" };
+                match &self.root {
+                    Some(_) => format!("{name}{label} — {}", self.root_display),
+                    None => format!("{name}{label}"),
                 }
             } else if tab.untitled {
                 let star = if tab.dirty { " ●" } else { "" };
@@ -369,7 +420,76 @@ impl Workspace {
             self._watcher = Some(w);
         }
 
+        // Git integration: when the folder is inside a repository, watch its
+        // status in the background and show real changes in the source
+        // control panel.
+        self.start_git_watcher(&path, cx);
+
         cx.notify();
+    }
+
+    /// Detect a git repository for `root` and spawn a background thread that
+    /// polls `git status` every ~1.5 s, forwarding snapshots to the UI only
+    /// when they actually changed. `git_poke()` forces an immediate poll.
+    pub(crate) fn start_git_watcher(&mut self, root: &Path, cx: &mut Context<Self>) {
+        let Some(repo_root) = git::find_repo_root(root) else {
+            self.git = None;
+            return;
+        };
+        let (poke_tx, poke_rx) = async_channel::unbounded::<()>();
+        let (status_tx, status_rx) = async_channel::unbounded::<RepoStatus>();
+
+        // First snapshot synchronously so the panel is populated before the
+        // first frame (the watcher would otherwise be ~1.5 s late).
+        if let Some(status) = git::status(&repo_root) {
+            self.git = Some(status.clone());
+            let _ = status_tx.try_send(status);
+        }
+
+        std::thread::spawn(move || {
+            let mut last: Option<RepoStatus> = None;
+            loop {
+                if let Some(status) = git::status(&repo_root) {
+                    if last.as_ref() != Some(&status) {
+                        if status_tx.try_send(status.clone()).is_err() {
+                            break; // workspace is gone
+                        }
+                        last = Some(status);
+                    }
+                }
+                // Sleep until the next poll, but wake up immediately when the
+                // workspace pokes us (save / commit / stage / …).
+                match poke_rx.recv_timeout(Duration::from_millis(1500)) {
+                    Ok(()) | Err(async_channel::RecvTimeoutError::Timeout) => {}
+                    Err(async_channel::RecvTimeoutError::Closed) => break,
+                }
+            }
+        });
+
+        self.git_poke_tx = Some(poke_tx);
+
+        cx.spawn({
+            let rx = status_rx.clone();
+            async move |this, cx| {
+                while let Ok(status) = rx.recv().await {
+                    let _ = this.update(cx, |workspace, cx| {
+                        workspace.git = Some(status);
+                        // Diff tabs show a snapshot; refresh the active one so
+                        // external changes (checkout, discard…) are visible.
+                        workspace.refresh_active_diff(cx);
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Ask the git polling thread to re-run `git status` right now.
+    pub(crate) fn git_poke(&self) {
+        if let Some(tx) = &self.git_poke_tx {
+            let _ = tx.try_send(());
+        }
     }
 
     pub(crate) fn open_folder_dialog(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -420,6 +540,7 @@ impl Workspace {
             untitled: true,
             preview: false, // New file tabs are permanent
             is_settings: false,
+            diff: None,
         });
         self.active_tab = self.tabs.len() - 1;
         self.status = "Untitled file — Ctrl+S to save".into();
@@ -571,20 +692,38 @@ impl Workspace {
         window.focus(&self.focus_handle);
     }
 
-    pub(crate) fn toggle_activity(&mut self, activity: Activity, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_activity(
+        &mut self,
+        activity: Activity,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.show_sidebar && self.activity == activity {
             self.show_sidebar = false;
         } else {
             self.show_sidebar = true;
             self.activity = activity;
+            // The source-control panel owns a commit-message input; create it
+            // when the panel is first opened (needs the window handle).
+            if activity == Activity::Git {
+                self.ensure_git_commit_input(window, cx);
+            }
         }
         self.status = self.activity.status_label().into();
         cx.notify();
     }
 
-    pub(crate) fn set_activity_explicit(&mut self, activity: Activity, cx: &mut Context<Self>) {
+    pub(crate) fn set_activity_explicit(
+        &mut self,
+        activity: Activity,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.show_sidebar = true;
         self.activity = activity;
+        if activity == Activity::Git {
+            self.ensure_git_commit_input(window, cx);
+        }
         self.status = activity.status_label().into();
         cx.notify();
     }
@@ -657,12 +796,26 @@ impl Workspace {
                     state
                 });
 
-                // Notify LSP of document open
+                // Notify LSP of document open and wire the editor up to the
+                // server: completions, hover, go-to-definition and code
+                // actions are driven by gpui-component's `InputState::lsp`
+                // provider hooks (the same surface Zed uses).
                 let root_path = self.root.clone();
-                self.lsp
+                let client = self
+                    .lsp
                     .lock()
                     .unwrap()
-                    .open_document(&path, lang_id, &text, root_path.as_deref());
+                    .ensure_server(lang_id, root_path.as_deref());
+                if let Some(client) = &client {
+                    client.did_open(&path, lang_id, &text);
+                }
+                if let Some(client) = client {
+                    let client = client.clone();
+                    let lsp_path = path.clone();
+                    editor.update(cx, move |state, _cx| {
+                        crate::lsp::attach_lsp_providers(state, client, lsp_path);
+                    });
+                }
 
                 // Subscribe to change events - also handles promoting preview to permanent
                 let path_clone = path.clone();
@@ -722,6 +875,7 @@ impl Workspace {
                         untitled: false,
                         preview: true, // New tabs start as preview
                         is_settings: false,
+                        diff: None,
                     });
                     self.active_tab = self.tabs.len() - 1;
                 }
@@ -767,6 +921,7 @@ impl Workspace {
         match std::fs::write(&path, text.as_bytes()) {
             Ok(()) => {
                 tab.dirty = false;
+                self.git_poke();
                 self.status = format!("Saved {}", display_name(&path));
             }
             Err(e) => self.status = format!("save failed: {e}"),
@@ -813,10 +968,31 @@ impl Workspace {
                         });
                     }
                 }
+                // Bring the language server up for the new file and connect
+                // the editor's LSP providers to it.
+                let root_path = self.root.clone();
+                let client = self
+                    .lsp
+                    .lock()
+                    .unwrap()
+                    .ensure_server(lang_id, root_path.as_deref());
+                if let Some(client) = &client {
+                    client.did_open(&path, lang_id, &text);
+                }
+                if let Some(client) = client {
+                    let client = client.clone();
+                    let lsp_path = path.clone();
+                    if let Some(editor) = self.tabs.get(active_idx).and_then(|t| t.editor.clone()) {
+                        editor.update(cx, move |state, _cx| {
+                            crate::lsp::attach_lsp_providers(state, client, lsp_path);
+                        });
+                    }
+                }
                 self.selected_path = Some(path.clone());
                 if let Some(root) = &self.root {
                     self.tree = reload_dir_preserving(root, &self.tree);
                 }
+                self.git_poke();
                 self.status = format!("Saved {} · {}", path.display(), lang::lsp_status(&path));
             }
             Err(e) => self.status = format!("save failed: {e}"),
@@ -1080,6 +1256,7 @@ impl Workspace {
             if let Some(root) = &self.root {
                 self.tree = reload_dir_preserving(root, &self.tree);
             }
+            self.git_poke();
             self.status = format!("Deleted {}", display_name(path));
         } else if let Err(e) = res {
             self.status = format!("Failed to delete: {e}");
@@ -1108,6 +1285,7 @@ impl Workspace {
                     if let Some(root) = &self.root {
                         self.tree = reload_dir_preserving(root, &self.tree);
                     }
+                    self.git_poke();
                     self.status = format!("Renamed to {}", display_name(&new_path));
                 }
             }
@@ -1188,6 +1366,481 @@ impl Workspace {
     }
 
     /// Open or focus the VS Code-style Settings tab
+    // -- Git -----------------------------------------------------------------
+
+    /// Refresh the git status immediately (used by the panel's refresh
+    /// button and after external git operations).
+    pub(crate) fn git_refresh(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.git.as_ref().map(|g| g.root.clone()) else {
+            self.status = "Not a git repository".into();
+            cx.notify();
+            return;
+        };
+        self.status = "Refreshing source control…".into();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let status = cx.background_spawn(async move { git::status(&root) }).await;
+            let _ = this.update(cx, |workspace, cx| match status {
+                Some(status) => {
+                    workspace.git = Some(status);
+                    workspace.status = "Source control refreshed".into();
+                }
+                None => workspace.status = "git status failed".into(),
+            });
+        })
+        .detach();
+    }
+
+    /// Stage one changed file.
+    pub(crate) fn git_stage_path(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let Some((root, change)) = self.git_change_for(path) else {
+            self.status = "Not a changed file".into();
+            cx.notify();
+            return;
+        };
+        self.run_git_op(
+            root,
+            vec![change.rel],
+            move |root, rels| git::stage(&root, &rels),
+            "Staged {}",
+            cx,
+        );
+    }
+
+    /// Unstage one file.
+    pub(crate) fn git_unstage_path(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let Some((root, change)) = self.git_change_for(path) else {
+            self.status = "Not a changed file".into();
+            cx.notify();
+            return;
+        };
+        self.run_git_op(
+            root,
+            vec![change.rel],
+            move |root, rels| git::unstage(&root, &rels),
+            "Unstaged {}",
+            cx,
+        );
+    }
+
+    /// Discard all worktree changes (or delete, when untracked) of one file.
+    pub(crate) fn git_discard_path(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let Some((root, change)) = self.git_change_for(path) else {
+            self.status = "Not a changed file".into();
+            cx.notify();
+            return;
+        };
+        let untracked = change.is_untracked();
+        self.run_git_op(
+            root,
+            vec![change.rel],
+            move |root, rels| {
+                if untracked {
+                    git::discard_untracked(&root, &rels)
+                } else {
+                    git::discard(&root, &rels)
+                }
+            },
+            "Discarded changes in {}",
+            cx,
+        );
+    }
+
+    /// Stage every change.
+    pub(crate) fn git_stage_all(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.git.as_ref().map(|g| g.root.clone()) else {
+            self.status = "Not a git repository".into();
+            cx.notify();
+            return;
+        };
+        self.run_git_op(root, Vec::new(), |root, _| git::stage_all(&root), "Staged all changes", cx);
+    }
+
+    /// Unstage every change.
+    pub(crate) fn git_unstage_all(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.git.as_ref().map(|g| g.root.clone()) else {
+            self.status = "Not a git repository".into();
+            cx.notify();
+            return;
+        };
+        let rels: Vec<String> = self
+            .git
+            .as_ref()
+            .map(|g| g.changes.iter().filter(|c| c.is_staged()).map(|c| c.rel.clone()).collect())
+            .unwrap_or_default();
+        if rels.is_empty() {
+            self.status = "Nothing staged".into();
+            cx.notify();
+            return;
+        }
+        self.run_git_op(
+            root,
+            rels,
+            |root, rels| git::unstage(&root, &rels),
+            "Unstaged all changes",
+            cx,
+        );
+    }
+
+    /// Discard every worktree change (untracked files are deleted).
+    pub(crate) fn git_discard_all(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.git.as_ref().map(|g| g.root.clone()) else {
+            self.status = "Not a git repository".into();
+            cx.notify();
+            return;
+        };
+        let (tracked, untracked) = self
+            .git
+            .as_ref()
+            .map(|g| {
+                g.changes
+                    .iter()
+                    .filter(|c| !c.is_staged() || c.worktree.is_some() || c.is_untracked())
+                    .partition::<Vec<_>, _>(|c| !c.is_untracked())
+            })
+            .unwrap_or_default();
+        let tracked: Vec<String> = tracked.iter().map(|c| c.rel.clone()).collect();
+        let untracked: Vec<String> = untracked.iter().map(|c| c.rel.clone()).collect();
+        self.run_git_op(
+            root,
+            tracked,
+            move |root, rels| {
+                if !rels.is_empty() && !git::discard(&root, &rels) {
+                    return false;
+                }
+                if !untracked.is_empty() {
+                    return git::discard_untracked(&root, &untracked);
+                }
+                true
+            },
+            "Discarded all changes",
+            cx,
+        );
+    }
+
+    /// Run one git mutation on a background thread, then poke the watcher so
+    /// the panel reflects the new status immediately.
+    fn run_git_op(
+        &mut self,
+        root: PathBuf,
+        rels: Vec<String>,
+        op: impl FnOnce(PathBuf, Vec<String>) -> bool + 'static,
+        success: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        let rel_name = rels.first().cloned().unwrap_or_default();
+        self.status = "Working…".into();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let ok = cx.background_spawn(async move { op(root, rels) }).await;
+            let _ = this.update(cx, |workspace, cx| {
+                if ok {
+                    if success.contains("{}") {
+                        workspace.status = success.replace("{}", &rel_name);
+                    } else {
+                        workspace.status = success.to_string();
+                    }
+                    workspace.git_poke();
+                } else {
+                    workspace.status = "Git operation failed".into();
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The commit-message input of the source-control panel. Created once on
+    /// first use; Enter (or the Commit button) commits the staged changes.
+    pub(crate) fn ensure_git_commit_input(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<InputState> {
+        if let Some(input) = &self.git_commit_input {
+            return input.clone();
+        }
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Message (Ctrl+Enter to commit)")
+        });
+        // Enter in the commit box commits. The subscribe callback has no
+        // window handle, so it only flags the request; render() (which does
+        // have the window) runs the commit on the next frame.
+        cx.subscribe(&input, |this, _state, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.git_commit_pending = true;
+                cx.notify();
+            }
+        })
+        .detach();
+        self.git_commit_input = Some(input.clone());
+        input
+    }
+
+    /// Commit the staged changes with the message from the commit box.
+    pub(crate) fn git_commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.git.as_ref().map(|g| g.root.clone()) else {
+            self.status = "Not a git repository — open a folder to commit".into();
+            cx.notify();
+            return;
+        };
+        let staged_count = self.git.as_ref().map(|g| g.staged_count()).unwrap_or(0);
+        if staged_count == 0 {
+            let changed = self.git.as_ref().map(|g| g.change_count()).unwrap_or(0);
+            self.status = if changed > 0 {
+                "Nothing staged — use + on a file or 'stage all' first".into()
+            } else {
+                "Nothing to commit".into()
+            };
+            cx.notify();
+            return;
+        }
+        let message = self
+            .git_commit_input
+            .as_ref()
+            .map(|i| i.read(cx).value().trim().to_string())
+            .unwrap_or_default();
+        if message.is_empty() {
+            self.status = "Commit message is empty".into();
+            cx.notify();
+            return;
+        }
+
+        self.status = "Committing…".into();
+        cx.notify();
+        let root = root.clone();
+        let message = message.clone();
+        let commit_input = self.git_commit_input.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { git::commit(&root, &message) })
+                .await;
+            let is_ok = result.is_ok();
+            let status = match result {
+                Ok(summary) => format!("Committed: {summary}"),
+                Err(e) => format!("Commit failed: {e}"),
+            };
+            let _ = this.update(cx, |workspace, cx| {
+                workspace.status = status.into();
+                if is_ok {
+                    workspace.git_poke();
+                }
+                cx.notify();
+            });
+            // Clear the commit input on success. `set_value` needs the window
+            // handle, so this runs through the async window context.
+            if is_ok {
+                if let Some(input) = &commit_input {
+                    let _ = input.downgrade().update_in(cx, |state, window, cx| {
+                        state.set_value("", window, cx);
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Open the diff of a changed file in a new editor tab. The diff text is
+    /// produced on a background thread; the tab shows a spinner meanwhile.
+    pub(crate) fn open_diff(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let Some((root, change)) = self.git_change_for(path) else {
+            self.status = "Not a changed file".into();
+            cx.notify();
+            return;
+        };
+        let staged = change.is_staged();
+
+        // Already open? Just switch to it.
+        if let Some(idx) = self
+            .tabs
+            .iter()
+            .position(|t| t.diff.as_ref().map(|d| d.path == path && d.staged == staged) == Some(true))
+        {
+            self.active_tab = idx;
+            cx.notify();
+            return;
+        }
+
+        let rel = change.rel.clone();
+        let diff_tab = DiffTab {
+            path: path.to_path_buf(),
+            rel: rel.clone(),
+            staged,
+            text: None,
+            error: None,
+        };
+        self.tabs.push(OpenTab {
+            path: None,
+            editor: None,
+            dirty: false,
+            untitled: false,
+            preview: false,
+            is_settings: false,
+            diff: Some(diff_tab),
+        });
+        self.active_tab = self.tabs.len() - 1;
+        self.status = if staged {
+            format!("Diff (staged): {}", display_name(path))
+        } else {
+            format!("Diff: {}", display_name(path))
+        };
+
+        // Load the diff text in the background.
+        let tab_path = path.to_path_buf();
+        cx.spawn(async move |this, cx| {
+            let text = cx
+                .background_spawn(async move {
+                    let raw = git::diff(&root, &rel, staged).unwrap_or_default();
+                    if !raw.trim().is_empty() {
+                        Some(raw)
+                    } else {
+                        // Untracked files have no git diff yet — show the
+                        // full content as one big addition.
+                        std::fs::read_to_string(&tab_path)
+                            .ok()
+                            .map(|content| git::new_file_diff(&rel, &content))
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |workspace, cx| {
+                if let Some(tab) = workspace
+                    .tabs
+                    .iter_mut()
+                    .find(|t| t.diff.as_ref().map(|d| d.path == tab_path) == Some(true))
+                {
+                    if let Some(diff) = &mut tab.diff {
+                        diff.text = text;
+                        diff.error = None;
+                    }
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Re-load the active diff tab's text (after git status changes).
+    fn refresh_active_diff(&mut self, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            return;
+        };
+        let Some(diff) = tab.diff.as_ref() else {
+            return;
+        };
+        let Some(root) = self.git.as_ref().map(|g| g.root.clone()) else {
+            return;
+        };
+        let rel = diff.rel.clone();
+        let staged = diff.staged;
+        let tab_path = diff.path.clone();
+        cx.spawn(async move |this, cx| {
+            let text = cx
+                .background_spawn(async move {
+                    let raw = git::diff(&root, &rel, staged).unwrap_or_default();
+                    if !raw.trim().is_empty() {
+                        Some(raw)
+                    } else {
+                        std::fs::read_to_string(&tab_path)
+                            .ok()
+                            .map(|content| git::new_file_diff(&rel, &content))
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |workspace, cx| {
+                if let Some(tab) = workspace
+                    .tabs
+                    .iter_mut()
+                    .find(|t| t.diff.as_ref().map(|d| d.path == tab_path) == Some(true))
+                {
+                    if let Some(diff) = &mut tab.diff {
+                        diff.text = text;
+                    }
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Discard the changes shown in the active diff tab.
+    pub(crate) fn discard_active_diff(&mut self, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            return;
+        };
+        let Some(diff) = tab.diff.as_ref() else {
+            return;
+        };
+        let path = diff.path.clone();
+        self.git_discard_path(&path, cx);
+    }
+
+    // -- LSP -----------------------------------------------------------------
+
+    /// Format the active document with its language server
+    /// (`textDocument/formatting`), then apply the returned edits.
+    pub(crate) fn format_document(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (path, editor, lang_id) = {
+            let Some(tab) = self.tabs.get(self.active_tab) else {
+                return;
+            };
+            let Some(path) = tab.path.clone() else {
+                return;
+            };
+            let Some(editor) = tab.editor.clone() else {
+                return;
+            };
+            let Some(lang_id) = lang::language_for(&path) else {
+                self.status = format!("{} has no language server", display_name(&path));
+                cx.notify();
+                return;
+            };
+            (path, editor, lang_id)
+        };
+        let Some(client) = self.lsp.lock().unwrap().client_for(lang_id) else {
+            self.status = format!("No language server running for {lang_id}");
+            cx.notify();
+            return;
+        };
+        let text = editor.read(cx).value().to_string();
+
+        self.status = "Formatting…".into();
+        cx.notify();
+        let editor_weak = editor.downgrade();
+        cx.spawn_in(window, async move |this, cx| {
+            let edits = cx
+                .background_spawn(async move { client.format_document(&path, &text) })
+                .await;
+            match edits {
+                Some(edits) if !edits.is_empty() => {
+                    // Apply on the UI thread; the window handle comes from
+                    // the async window context.
+                    let _ = editor_weak.update_in(cx, |state, window, cx| {
+                        state.apply_lsp_edits(&edits, window, cx);
+                    });
+                    let _ = this.update(cx, |workspace, cx| {
+                        workspace.status = format!("Formatted {}", display_name(&path));
+                        cx.notify();
+                    });
+                }
+                Some(_) => {
+                    let _ = this.update(cx, |workspace, cx| {
+                        workspace.status = "Document already formatted".into();
+                        cx.notify();
+                    });
+                }
+                None => {
+                    let _ = this.update(cx, |workspace, cx| {
+                        workspace.status =
+                            "Formatting not supported by the language server".into();
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
     pub(crate) fn open_settings(&mut self, cx: &mut Context<Self>) {
         if let Some(idx) = self.tabs.iter().position(|t| t.is_settings) {
             self.active_tab = idx;
@@ -1199,6 +1852,7 @@ impl Workspace {
                 untitled: false,
                 preview: false,
                 is_settings: true,
+                diff: None,
             });
             self.active_tab = self.tabs.len() - 1;
         }

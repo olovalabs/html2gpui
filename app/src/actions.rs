@@ -32,7 +32,13 @@ actions!(
         IncreaseFontSize,
         DecreaseFontSize,
         ResetFontSize,
-        CopyDiagnostic
+        CopyDiagnostic,
+        FormatDocument,
+        GitRefresh,
+        GitStageAll,
+        GitUnstageAll,
+        GitDiscardAll,
+        GitCommit
     ]
 );
 
@@ -97,5 +103,42 @@ pub struct ExplorerRename {
 #[derive(Clone, Debug, PartialEq, gpui::Action)]
 #[action(no_json)]
 pub struct ExplorerDelete {
+    pub path: PathBuf,
+}
+
+// -- Source control (Git) payload actions ------------------------------------
+
+/// Stage one changed file (from the source-control panel).
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(no_json)]
+pub struct GitStageFile {
+    pub path: PathBuf,
+}
+
+/// Unstage one file (from the source-control panel).
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(no_json)]
+pub struct GitUnstageFile {
+    pub path: PathBuf,
+}
+
+/// Discard all worktree changes of one file (from the source-control panel).
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(no_json)]
+pub struct GitDiscardFile {
+    pub path: PathBuf,
+}
+
+/// Open the diff of one changed file in an editor tab.
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(no_json)]
+pub struct GitOpenDiff {
+    pub path: PathBuf,
+}
+
+/// Open a changed file in the editor (from the source-control panel).
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(no_json)]
+pub struct GitOpenFile {
     pub path: PathBuf,
 }
