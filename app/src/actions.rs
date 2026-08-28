@@ -20,6 +20,7 @@ actions!(
         ShowExtensions,
         ToggleSidebar,
         ToggleTerminal,
+        NewTerminal,
         About,
         ExplorerRefresh,
         ExplorerCollapseAll,

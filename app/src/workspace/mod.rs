@@ -85,8 +85,12 @@ pub(crate) struct Workspace {
     pub(crate) lsp: Arc<Mutex<LspManager>>,
     /// Active diagnostics received from language servers
     pub(crate) diagnostics_by_path: HashMap<PathBuf, Vec<lsp_types::Diagnostic>>,
-    /// Integrated Terminal instance
-    pub(crate) terminal: Option<Entity<crate::terminal::Terminal>>,
+    /// Integrated Terminal tabs (VS Code-style: multiple shells, one active).
+    pub(crate) terminal_tabs: Vec<Entity<crate::terminal::Terminal>>,
+    /// Index of the currently active terminal tab.
+    pub(crate) active_terminal: usize,
+    /// Monotonic counter for labeling new terminals (PowerShell 1, PowerShell 2, ...).
+    pub(crate) next_terminal_id: usize,
     /// File system change notification sender
     pub(crate) fs_event_tx: async_channel::Sender<()>,
     /// Background file system watcher
@@ -199,7 +203,9 @@ impl Workspace {
             font_size: 14.5,
             lsp,
             diagnostics_by_path: HashMap::new(),
-            terminal: None,
+            terminal_tabs: Vec::new(),
+            active_terminal: 0,
+            next_terminal_id: 1,
             fs_event_tx,
             _watcher: None,
             tabs: Vec::new(),
@@ -374,22 +380,78 @@ impl Workspace {
         }
 
         self.show_terminal = true;
-        if self.terminal.is_none() {
-            let root = self.root.clone();
-            let term = cx.new(|cx| crate::terminal::Terminal::new(root.as_deref(), window, cx));
-            self.terminal = Some(term);
+        // Toggle only hides once at least one terminal already exists; if the
+        // user never opened one, lazily create the first tab (VS Code behavior).
+        if self.terminal_tabs.is_empty() {
+            self.new_terminal(window, cx);
+            return;
         }
-        if let Some(term) = &self.terminal {
-            let focus = term.read(cx).focus_handle(cx);
-            focus.focus(window);
-        }
+        self.focus_active_terminal(window, cx);
         self.status = "Terminal active".into();
         cx.notify();
+    }
+
+    /// Create a brand-new terminal tab (spawns a fresh shell/PTY), make it the
+    /// active tab, show the panel and give it focus. Labeled `PowerShell N` so
+    /// tabs stay distinguishably unique across opens/closes.
+    pub(crate) fn new_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.root.clone();
+        let id = self.next_terminal_id;
+        self.next_terminal_id += 1;
+        let label = if cfg!(windows) {
+            format!("PowerShell {id}")
+        } else {
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
+            let base = if shell.ends_with("zsh") {
+                "zsh"
+            } else if shell.ends_with("fish") {
+                "fish"
+            } else {
+                "bash"
+            };
+            format!("{base} {id}")
+        };
+        let term = cx.new(|cx| crate::terminal::Terminal::new(root.as_deref(), label, window, cx));
+        self.terminal_tabs.push(term);
+        self.active_terminal = self.terminal_tabs.len() - 1;
+        self.show_terminal = true;
+        self.focus_active_terminal(window, cx);
+        self.status = format!(
+            "Terminal {} created",
+            self.active_terminal + 1
+        );
+        cx.notify();
+    }
+
+    /// Switch the active terminal tab and hand it focus (VS Code tab click).
+    pub(crate) fn activate_terminal(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if index >= self.terminal_tabs.len() {
+            return;
+        }
+        self.active_terminal = index;
+        if let Some(term) = self.terminal_tabs.get(index).cloned() {
+            term.read(cx).focus_handle(cx).focus(window);
+        }
+        self.status = format!("Terminal {} active", index + 1);
+        cx.notify();
+    }
+
+    /// Focus the active terminal tab's view.
+    fn focus_active_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(term) = self.terminal_tabs.get(self.active_terminal).cloned() {
+            term.read(cx).focus_handle(cx).focus(window);
+        }
     }
 
     /// Hide the terminal panel and hand focus back to the active editor (or
     /// the workspace itself). Like Zed's dock toggle, focus is never left on
     /// a panel that is about to disappear, otherwise keybindings go dead.
+    /// Sessions in all tabs stay alive; [`Self::close_terminal`] kills them.
     pub(crate) fn hide_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.show_terminal = false;
         self.status = "Terminal hidden".into();
@@ -397,18 +459,44 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Close the terminal panel AND terminate its shell process/session (VS
-    /// Code close-button behavior). Drops the terminal entity, which closes
-    /// the PTY and kills the child shell; the next Ctrl+` starts a fresh shell.
-    /// Unlike [`Self::hide_terminal`] (panel toggle, session kept alive), this
-    /// fully exits the terminal.
-    pub(crate) fn close_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.show_terminal = false;
+    /// Close one terminal tab (VS Code tab ×): drops that terminal's entity,
+    /// which closes its PTY and kills the child shell. Adjusts the active tab
+    /// and hides the whole panel when the last tab is closed. Unlike
+    /// [`Self::hide_terminal`] this fully exits the closed shell, not just the
+    /// panel.
+    pub(crate) fn close_terminal(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if index >= self.terminal_tabs.len() {
+            return;
+        }
         // Dropping the entity tears down the terminal view and closes the PTY
         // master, which terminates the running shell process.
-        self.terminal.take();
-        self.status = "Terminal closed".into();
-        self.focus_active_editor_or_self(window, cx);
+        self.terminal_tabs.remove(index);
+
+        if self.terminal_tabs.is_empty() {
+            self.active_terminal = 0;
+            self.show_terminal = false;
+            self.status = "Terminal closed".into();
+            self.focus_active_editor_or_self(window, cx);
+            cx.notify();
+            return;
+        }
+
+        if self.active_terminal >= self.terminal_tabs.len() {
+            self.active_terminal = self.terminal_tabs.len() - 1;
+        } else if index < self.active_terminal {
+            self.active_terminal -= 1;
+        }
+        self.focus_active_terminal(window, cx);
+        self.status = format!(
+            "Terminal {} closed — {} terminal(s) remain",
+            index + 1,
+            self.terminal_tabs.len()
+        );
         cx.notify();
     }
 

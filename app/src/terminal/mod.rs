@@ -8,8 +8,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use gpui::{
-    div, prelude::*, px, rgba, svg, Context, Edges, Entity, FocusHandle, FontWeight, IntoElement,
-    Window,
+    div, prelude::*, px, rgba, svg, Context, Edges, Entity, FocusHandle, IntoElement, Window,
 };
 use gpui_terminal::{ColorPalette, TerminalConfig, TerminalView};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
@@ -20,11 +19,17 @@ use crate::workspace::Workspace;
 
 pub struct Terminal {
     pub view: Entity<TerminalView>,
-    pub shell_name: String,
+    /// Shell display name shown on the tab (e.g. "PowerShell 1").
+    pub name: String,
 }
 
 impl Terminal {
-    pub fn new(root_dir: Option<&Path>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        root_dir: Option<&Path>,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -35,7 +40,7 @@ impl Terminal {
             })
             .expect("Failed to open PTY");
 
-        let (shell_cmd, shell_name) = if cfg!(windows) {
+        let (shell_cmd, _shell_name) = if cfg!(windows) {
             ("powershell.exe", "PowerShell")
         } else {
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
@@ -94,7 +99,7 @@ impl Terminal {
 
         Self {
             view,
-            shell_name: shell_name.to_string(),
+            name,
         }
     }
 
@@ -103,14 +108,18 @@ impl Terminal {
     }
 }
 
-pub fn render_terminal(
-    terminal_entity: &Entity<Terminal>,
+pub fn render_terminal_panel(
+    tabs: &[Entity<Terminal>],
+    active: usize,
     t: &Colors,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
-    let term = terminal_entity.read(cx);
-    let shell_name = term.shell_name.clone();
-    let term_view = term.view.clone();
+    // Guard: only render the body when at least one tab exists. The caller
+    // hides the panel when the last tab is closed, so this is defensive.
+    let active_view = tabs
+        .get(active)
+        .map(|term| term.read(cx).view.clone())
+        .or_else(|| tabs.first().map(|term| term.read(cx).view.clone()));
 
     div()
         .size_full()
@@ -119,66 +128,158 @@ pub fn render_terminal(
         .bg(rgba(t.terminal_bg))
         .border_t_1()
         .border_color(rgba(t.border_variant))
+        // Terminal tab strip (VS Code style): one tab per shell, a [+] to add
+        // a new terminal, and a chevron to collapse/hide the panel.
+        .child(render_terminal_tab_bar(tabs, active, t, cx))
+        // Embedded Terminal View from gpui-terminal (active tab only).
         .child(
-            // Terminal Toolbar
-            div()
-                .h(px(28.0))
-                .w_full()
-                .px(px(12.0))
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .bg(rgba(t.toolbar))
-                .border_b_1()
-                .border_color(rgba(t.border_variant))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child(
-                            svg()
-                                .path("ui_icons/terminal_tint.svg")
-                                .w(px(13.0))
-                                .h(px(13.0))
-                                .text_color(rgba(t.icon)),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(rgba(t.text))
-                                .child(format!("TERMINAL ({shell_name})")),
-                        ),
-                )
-                .child(
-                    div()
-                        .id("term-close-btn")
-                        .w(px(20.0))
-                        .h(px(20.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(3.0))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(rgba(t.element_hover)))
-                        .text_size(px(12.0))
-                        .text_color(rgba(t.text_muted))
-                        .child("×")
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.close_terminal(window, cx);
-                        })),
-                ),
-        )
-        .child(
-            // Embedded Terminal View from gpui-terminal
             div()
                 .flex_1()
                 .w_full()
                 .min_h(px(0.0))
                 .overflow_hidden()
-                .child(term_view),
+                .when_some(active_view, |d, view| d.child(view)),
         )
+}
+
+/// Terminal tab strip at the top of the panel.
+fn render_terminal_tab_bar(
+    tabs: &[Entity<Terminal>],
+    active: usize,
+    t: &Colors,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let tabs_root = div()
+        .id("terminal-tab-bar")
+        .h(px(28.0))
+        .w_full()
+        .px(px(6.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(2.0))
+        .bg(rgba(t.toolbar))
+        .border_b_1()
+        .border_color(rgba(t.border_variant))
+        .child(
+            // Terminal icon + label anchoring the strip.
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .mr(px(4.0))
+                .child(
+                    svg()
+                        .path("ui_icons/terminal_tint.svg")
+                        .w(px(13.0))
+                        .h(px(13.0))
+                        .text_color(rgba(t.icon)),
+                ),
+        );
+
+    let with_tabs = tabs_root.children(tabs.iter().enumerate().map(|(idx, _)| {
+        let is_active = idx == active;
+        let name = tabs[idx].read(cx).name.clone();
+        render_terminal_tab(name, idx, is_active, t, cx)
+    }));
+
+    with_tabs
+        .child(div().flex_1())
+        .child(render_new_terminal_button(t, cx))
+        .child(render_hide_panel_button(t, cx))
+}
+
+/// A single terminal tab with its own close (×) button. Clicking the tab
+/// activates it; clicking × kills that shell (VS Code).
+fn render_terminal_tab(
+    name: String,
+    index: usize,
+    is_active: bool,
+    t: &Colors,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let bg = if is_active { t.tab_active_bg } else { t.tab_inactive_bg };
+    let fg = if is_active { t.tab_active_fg } else { t.tab_inactive_fg };
+
+    div()
+        .id(("terminal-tab", index))
+        .h(px(20.0))
+        .pl(px(10.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(2.0))
+        .rounded(px(4.0))
+        .bg(rgba(bg))
+        .cursor_pointer()
+        .text_size(px(11.5))
+        .text_color(rgba(fg))
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.activate_terminal(index, window, cx);
+        }))
+        .hover(|h| if is_active { h } else { h.bg(rgba(t.element_hover)) })
+        .child(div().child(name))
+        .child(
+            div()
+                .id(("terminal-tab-close", index))
+                .w(px(16.0))
+                .h(px(16.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(3.0))
+                .cursor_pointer()
+                .opacity(0.6)
+                .hover(|h| h.opacity(1.0).bg(rgba(t.element_hover)))
+                .child(div().text_size(px(11.0)).text_color(rgba(fg)).child("×"))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.close_terminal(index, window, cx);
+                })),
+        )
+}
+
+/// "+" button that spawns a new terminal tab.
+fn render_new_terminal_button(t: &Colors, cx: &mut Context<Workspace>) -> impl IntoElement {
+    div()
+        .id("term-new-btn")
+        .w(px(22.0))
+        .h(px(20.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.0))
+        .cursor_pointer()
+        .hover(|s| s.bg(rgba(t.element_hover)))
+        .text_size(px(15.0))
+        .text_color(rgba(t.text_muted))
+        .child("+")
+        .on_click(cx.listener(|this, _, window, cx| {
+            this.new_terminal(window, cx);
+        }))
+}
+
+/// Chevron button that hides the panel while keeping all shell sessions alive
+/// (equivalent to the Ctrl+` toggle, but mouse driven).
+fn render_hide_panel_button(t: &Colors, cx: &mut Context<Workspace>) -> impl IntoElement {
+    div()
+        .id("term-hide-btn")
+        .w(px(22.0))
+        .h(px(20.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.0))
+        .cursor_pointer()
+        .hover(|s| s.bg(rgba(t.element_hover)))
+        .child(
+            svg()
+                .path("ui_icons/chevron-down_tint.svg")
+                .w(px(14.0))
+                .h(px(14.0))
+                .text_color(rgba(t.text_muted)),
+        )
+        .on_click(cx.listener(|this, _, window, cx| {
+            this.hide_terminal(window, cx);
+        }))
 }

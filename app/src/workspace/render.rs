@@ -47,7 +47,8 @@ impl Render for Workspace {
         let theme_ix = self.theme_ix;
         let theme_name = th.name.clone();
         let font_size = self.font_size;
-        let terminal = self.terminal.clone();
+        let terminal_tabs = self.terminal_tabs.clone();
+        let active_terminal = self.active_terminal;
 
         // Clamp panel sizes against the current viewport so shrinking or
         // maximizing the window never leaves a panel overflowing — and so
@@ -98,6 +99,9 @@ impl Render for Workspace {
             )
             .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
                 this.toggle_terminal(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NewTerminal, window, cx| {
+                this.new_terminal(window, cx);
             }))
             .on_action(cx.listener(|this, _: &NewFile, window, cx| this.new_file(window, cx)))
             .on_action(cx.listener(|this, _: &OpenFile, window, cx| {
@@ -275,19 +279,20 @@ impl Render for Workspace {
                                         }
                                     }),
                             )
-                            .when(show_terminal, |col| {
-                                if let Some(term) = &terminal {
-                                    col.child(resize_handle(ResizeKind::Terminal, &t, cx))
-                                        .child(
-                                            div()
-                                                .h(px(terminal_h))
-                                                .flex_shrink_0()
-                                                .overflow_hidden()
-                                                .child(crate::terminal::render_terminal(term, &t, cx)),
-                                        )
-                                } else {
-                                    col
-                                }
+                            .when(show_terminal && !terminal_tabs.is_empty(), |col| {
+                                col.child(resize_handle(ResizeKind::Terminal, &t, cx))
+                                    .child(
+                                        div()
+                                            .h(px(terminal_h))
+                                            .flex_shrink_0()
+                                            .overflow_hidden()
+                                            .child(crate::terminal::render_terminal_panel(
+                                                &terminal_tabs,
+                                                active_terminal,
+                                                &t,
+                                                cx,
+                                            )),
+                                    )
                             }),
                     ),
             )
