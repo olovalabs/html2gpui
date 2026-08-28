@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use gpui::{App, Context, Entity, SharedString, Task, Window};
+use gpui::{App, AppContext, Context, Entity, SharedString, Task, Window};
 use gpui_component::input::{
     CodeActionProvider, CompletionProvider, DefinitionProvider, HoverProvider, InputState, Rope,
     RopeExt,
@@ -463,7 +463,7 @@ impl LspClient {
                     content_format: Some(vec![lsp_types::MarkupKind::Markdown]),
                     ..Default::default()
                 }),
-                definition: Some(lsp_types::GotoDefinitionCapability {
+                definition: Some(lsp_types::GotoCapability {
                     dynamic_registration: Some(true),
                     link_support: Some(true),
                 }),
@@ -988,8 +988,9 @@ impl CodeActionProvider for LspCodeActionProvider {
                         diagnostics: None,
                         edit: None,
                         command: Some(command),
-                        data: None,
+                        is_preferred: None,
                         disabled: None,
+                        data: None,
                     },
                 })
                 .collect();

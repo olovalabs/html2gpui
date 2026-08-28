@@ -1380,12 +1380,15 @@ impl Workspace {
         cx.notify();
         cx.spawn(async move |this, cx| {
             let status = cx.background_spawn(async move { git::status(&root) }).await;
-            let _ = this.update(cx, |workspace, cx| match status {
-                Some(status) => {
-                    workspace.git = Some(status);
-                    workspace.status = "Source control refreshed".into();
+            let _ = this.update(cx, |workspace, cx| {
+                match status {
+                    Some(status) => {
+                        workspace.git = Some(status);
+                        workspace.status = "Source control refreshed".into();
+                    }
+                    None => workspace.status = "git status failed".into(),
                 }
-                None => workspace.status = "git status failed".into(),
+                cx.notify();
             });
         })
         .detach();

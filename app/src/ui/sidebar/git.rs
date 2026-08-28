@@ -183,7 +183,7 @@ fn header_button(
                 .text_color(rgba(t.icon_muted)),
         )
         .on_click(cx.listener(move |this, _, window, cx| {
-            window.dispatch_action(Box::new(action.clone()), cx);
+            window.dispatch_action(action.boxed_clone(), cx);
         }))
 }
 
