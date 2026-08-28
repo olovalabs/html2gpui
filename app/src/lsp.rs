@@ -9,8 +9,10 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use lsp_types::{
     ClientCapabilities, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
@@ -89,16 +91,33 @@ impl LspManager {
             client.did_close(path);
         }
     }
+
+    /// True when an LSP client is running for `lang`.
+    ///
+    /// Lets the UI skip whole-buffer reads and coalescing work on every
+    /// keystroke when no server exists for the language (e.g. plain text or
+    /// a server binary that isn't installed).
+    pub fn has_client(&self, lang: &str) -> bool {
+        self.clients.contains_key(lang)
+    }
 }
 
 pub struct LspClient {
     #[allow(dead_code)]
     pub lang: String,
-    stdin: Arc<Mutex<Option<ChildStdin>>>,
+    /// Outbound framed messages, drained by a dedicated writer thread so a
+    /// slow language server (full stdin pipe) can never stall the UI thread.
+    /// The channel is unbounded, so `send` never blocks.
+    out: mpsc::Sender<Vec<u8>>,
     versions: Arc<Mutex<HashMap<PathBuf, i32>>>,
     is_alive: Arc<Mutex<bool>>,
     is_initialized: Arc<Mutex<bool>>,
     pending_opens: Arc<Mutex<Vec<(PathBuf, String, String)>>>,
+    /// Documents whose text changed but haven't been synced yet: latest text
+    /// per path. The writer thread flushes these as debounced full-document
+    /// `didChange` messages, coalescing a fast typist's keystrokes into a
+    /// single sync instead of one whole-document message per keystroke.
+    pending_changes: Arc<Mutex<HashMap<PathBuf, String>>>,
     child: Arc<Mutex<Option<Child>>>,
 }
 
@@ -159,26 +178,60 @@ impl LspClient {
         let is_initialized = Arc::new(Mutex::new(false));
         let pending_opens = Arc::new(Mutex::new(Vec::new()));
         let versions = Arc::new(Mutex::new(HashMap::new()));
+        let pending_changes: Arc<Mutex<HashMap<PathBuf, String>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         let child_arc = Arc::new(Mutex::new(Some(child)));
+
+        // Framed-message channel drained by a dedicated writer thread. All
+        // sends are non-blocking (unbounded mpsc), so the UI thread never
+        // blocks on a language server that is slow to drain its stdin.
+        let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>();
 
         let client = Self {
             lang: lang.to_string(),
-            stdin: stdin_arc.clone(),
+            out: out_tx.clone(),
             versions: versions.clone(),
             is_alive: is_alive.clone(),
             is_initialized: is_initialized.clone(),
             pending_opens: pending_opens.clone(),
+            pending_changes: pending_changes.clone(),
             child: child_arc,
         };
 
         // Send initialize request
         client.send_initialize(root_dir);
 
+        // Writer thread: writes framed messages to the child's stdin and,
+        // between messages, flushes coalesced didChange documents (debounced
+        // ~120 ms). Since this is its own OS thread, a blocked `write_all`
+        // (full pipe) costs the UI thread nothing.
+        {
+            let is_alive_w = is_alive.clone();
+            let stdin_for_write = stdin_arc.clone();
+            let pending_w = pending_changes.clone();
+            let versions_w = versions.clone();
+            thread::spawn(move || {
+                loop {
+                    match out_rx.recv_timeout(Duration::from_millis(120)) {
+                        Ok(bytes) => write_to_stdin(&stdin_for_write, &bytes),
+                        Err(RecvTimeoutError::Timeout) => {
+                            flush_pending_changes(&stdin_for_write, &pending_w, &versions_w);
+                        }
+                        Err(RecvTimeoutError::Disconnected) => break,
+                    }
+                    if !*is_alive_w.lock().unwrap() {
+                        flush_pending_changes(&stdin_for_write, &pending_w, &versions_w);
+                        break;
+                    }
+                }
+            });
+        }
+
         // Spawn stdout reader thread
         let lang_str = lang.to_string();
         let is_alive_clone = is_alive.clone();
         let is_init_clone = is_initialized.clone();
-        let stdin_for_init = stdin_arc.clone();
+        let out_for_init = out_tx.clone();
         let pending_for_init = pending_opens.clone();
         let versions_for_init = versions.clone();
 
@@ -186,7 +239,7 @@ impl LspClient {
             let mut reader = BufReader::new(stdout);
             while *is_alive_clone.lock().unwrap() {
                 match read_message(&mut reader) {
-                    Ok(Some(msg)) => {
+                    Ok(Some(mut msg)) => {
                         // Check if this is the initialize response (id: 1)
                         if msg.get("id").and_then(Value::as_i64) == Some(1) {
                             *is_init_clone.lock().unwrap() = true;
@@ -197,7 +250,7 @@ impl LspClient {
                                 "method": "initialized",
                                 "params": InitializedParams {}
                             });
-                            send_raw_payload(&stdin_for_init, &initialized);
+                            send_framed(&out_for_init, &initialized);
 
                             // Drain and send all pending did_open documents
                             let pendings: Vec<_> = {
@@ -221,12 +274,12 @@ impl LspClient {
                                         "method": "textDocument/didOpen",
                                         "params": params
                                     });
-                                    send_raw_payload(&stdin_for_init, &open_msg);
+                                    send_framed(&out_for_init, &open_msg);
                                 }
                             }
                         }
 
-                        handle_incoming_message(&msg, &event_tx);
+                        handle_incoming_message(&mut msg, &event_tx);
                     }
                     Ok(None) => {
                         break;
@@ -334,33 +387,14 @@ impl LspClient {
             return;
         }
 
-        let Some(uri) = path_to_uri(path) else {
-            return;
-        };
-        let mut versions = self.versions.lock().unwrap();
-        let version = versions.entry(path.to_path_buf()).or_insert(1);
-        *version += 1;
-        let current_version = *version;
-
-        let params = DidChangeTextDocumentParams {
-            text_document: VersionedTextDocumentIdentifier {
-                uri,
-                version: current_version,
-            },
-            content_changes: vec![TextDocumentContentChangeEvent {
-                range: None,
-                range_length: None,
-                text: text.to_string(),
-            }],
-        };
-
-        let msg = json!({
-            "jsonrpc": "2.0",
-            "method": "textDocument/didChange",
-            "params": params
-        });
-
-        self.send_payload(&msg);
+        // Coalesce: remember only the latest text per document. The writer
+        // thread flushes pending changes as debounced full-document syncs,
+        // so a fast typist costs one network round-trip every ~120 ms
+        // instead of one whole-document serialization + write per keystroke.
+        self.pending_changes
+            .lock()
+            .unwrap()
+            .insert(path.to_path_buf(), text.to_string());
     }
 
     pub fn did_close(&self, path: &Path) {
@@ -368,6 +402,9 @@ impl LspClient {
             return;
         };
         self.versions.lock().unwrap().remove(path);
+        // Drop any not-yet-flushed edit for the document so a coalesced
+        // didChange can never race the didClose.
+        self.pending_changes.lock().unwrap().remove(path);
 
         let params = DidCloseTextDocumentParams {
             text_document: TextDocumentIdentifier { uri },
@@ -383,22 +420,85 @@ impl LspClient {
     }
 
     fn send_payload(&self, val: &Value) {
-        send_raw_payload(&self.stdin, val);
+        send_framed(&self.out, val);
     }
 }
 
-fn send_raw_payload(stdin_arc: &Arc<Mutex<Option<ChildStdin>>>, val: &Value) {
-    let Ok(json_str) = serde_json::to_string(val) else {
-        return;
-    };
+/// Serialize `val` as one framed (Content-Length headed) JSON-RPC message.
+/// `None` when serialization fails.
+fn frame_payload(val: &Value) -> Option<Vec<u8>> {
+    let json_str = serde_json::to_string(val).ok()?;
     let body = json_str.as_bytes();
     let header = format!("Content-Length: {}\r\n\r\n", body.len());
+    let mut bytes = Vec::with_capacity(header.len() + body.len());
+    bytes.extend_from_slice(header.as_bytes());
+    bytes.extend_from_slice(body);
+    Some(bytes)
+}
 
+/// Non-blocking enqueue of one framed message onto the writer channel.
+fn send_framed(tx: &mpsc::Sender<Vec<u8>>, val: &Value) {
+    if let Some(bytes) = frame_payload(val) {
+        let _ = tx.send(bytes);
+    }
+}
+
+/// Write framed bytes to the child's stdin (writer thread only).
+fn write_to_stdin(stdin_arc: &Arc<Mutex<Option<ChildStdin>>>, bytes: &[u8]) {
     let mut stdin_guard = stdin_arc.lock().unwrap();
     if let Some(stdin) = stdin_guard.as_mut() {
-        let _ = stdin.write_all(header.as_bytes());
-        let _ = stdin.write_all(body);
+        let _ = stdin.write_all(bytes);
         let _ = stdin.flush();
+    }
+}
+
+/// Flush every coalesced `didChange` document as a full-document sync with a
+/// monotonically increasing version. Runs on the writer thread, so any pipe
+/// backpressure blocks a background thread, never the UI.
+fn flush_pending_changes(
+    stdin_arc: &Arc<Mutex<Option<ChildStdin>>>,
+    pending: &Mutex<HashMap<PathBuf, String>>,
+    versions: &Mutex<HashMap<PathBuf, i32>>,
+) {
+    let items: Vec<(PathBuf, String)> = {
+        let mut guard = pending.lock().unwrap();
+        guard.drain().collect()
+    };
+    if items.is_empty() {
+        return;
+    }
+    for (path, text) in items {
+        // The document was closed before the flush — drop the stale edit.
+        // (Bind the check so the guard is dropped before the lock below.)
+        let doc_open = versions.lock().unwrap().contains_key(&path);
+        if !doc_open {
+            continue;
+        }
+        let Some(uri) = path_to_uri(&path) else {
+            continue;
+        };
+        let version = {
+            let mut versions_guard = versions.lock().unwrap();
+            let v = versions_guard.entry(path).or_insert(1);
+            *v += 1;
+            *v
+        };
+        let params = DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier { uri, version },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text,
+            }],
+        };
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": params
+        });
+        if let Some(bytes) = frame_payload(&msg) {
+            write_to_stdin(stdin_arc, &bytes);
+        }
     }
 }
 
@@ -510,14 +610,18 @@ fn read_message<R: BufRead>(reader: &mut R) -> std::io::Result<Option<Value>> {
     Ok(val)
 }
 
-fn handle_incoming_message(msg: &Value, event_tx: &async_channel::Sender<LspEvent>) {
+fn handle_incoming_message(msg: &mut Value, event_tx: &async_channel::Sender<LspEvent>) {
     let Some(method) = msg.get("method").and_then(Value::as_str) else {
         return;
     };
 
     if method == "textDocument/publishDiagnostics" {
-        if let Some(params) = msg.get("params") {
-            if let Ok(mut pub_diag) = serde_json::from_value::<PublishDiagnosticsParams>(params.clone()) {
+        // `params` is taken (moved) out of `msg` instead of cloned — the
+        // JSON body of a diagnostics push is the heaviest per-message cost.
+        if let Some(params) = msg.get_mut("params") {
+            if let Ok(mut pub_diag) =
+                serde_json::from_value::<PublishDiagnosticsParams>(std::mem::take(params))
+            {
                 if let Some(path) = uri_to_path(&pub_diag.uri) {
                     for diag in &mut pub_diag.diagnostics {
                         let source_str = diag.source.as_deref().unwrap_or("typescript");

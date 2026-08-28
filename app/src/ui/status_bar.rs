@@ -27,7 +27,7 @@ pub(crate) fn render_status_bar(
                 .flex()
                 .items_center()
                 .gap(px(8.0))
-                .child(SharedString::from(status.to_string())),
+                .child(SharedString::from(status)),
         )
         .child(
             div()
@@ -41,7 +41,7 @@ pub(crate) fn render_status_bar(
                         .h(px(13.0))
                         .text_color(rgba(t.text)),
                 )
-                .child(SharedString::from(theme_name.to_string()))
+                .child(SharedString::from(theme_name))
                 .child(SharedString::from("UTF-8"))
                 .child(SharedString::from("Spaces: 4")),
         )

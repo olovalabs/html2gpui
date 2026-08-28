@@ -4,7 +4,7 @@
 
 mod render;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -83,16 +83,23 @@ pub(crate) struct Workspace {
     pub(crate) font_size: f32,
     /// Language Server Protocol client manager
     pub(crate) lsp: Arc<Mutex<LspManager>>,
-    /// Active diagnostics received from language servers
-    pub(crate) diagnostics_by_path: HashMap<PathBuf, Vec<lsp_types::Diagnostic>>,
+    /// Active diagnostics received from language servers, shared with the
+    /// editors via `Arc` so an LSP publish clones the payload once (per
+    /// editor) instead of once per storage site plus once per editor.
+    pub(crate) diagnostics_by_path: HashMap<PathBuf, Arc<Vec<lsp_types::Diagnostic>>>,
     /// Integrated Terminal tabs (VS Code-style: multiple shells, one active).
     pub(crate) terminal_tabs: Vec<Entity<crate::terminal::Terminal>>,
     /// Index of the currently active terminal tab.
     pub(crate) active_terminal: usize,
     /// Monotonic counter for labeling new terminals (PowerShell 1, PowerShell 2, ...).
     pub(crate) next_terminal_id: usize,
-    /// File system change notification sender
-    pub(crate) fs_event_tx: async_channel::Sender<()>,
+    /// File system change notification sender: the changed path, so reloads
+    /// can be scoped to the affected directory instead of rescanning the
+    /// whole tree on every event.
+    pub(crate) fs_event_tx: async_channel::Sender<PathBuf>,
+    /// Cached `display_name(root)` so the title bar and explorer header don't
+    /// re-derive (and re-allocate) the folder name on every frame.
+    pub(crate) root_display: String,
     /// Background file system watcher
     pub(crate) _watcher: Option<notify::RecommendedWatcher>,
     /// Open tabs
@@ -164,22 +171,56 @@ impl Workspace {
         })
         .detach();
 
-        let (fs_event_tx, fs_event_rx) = async_channel::unbounded::<()>();
+        let (fs_event_tx, fs_event_rx) = async_channel::unbounded::<PathBuf>();
+        // Resolved "directories to reload" channel, produced off the UI
+        // thread and consumed on it.
+        let (fs_reload_tx, fs_reload_rx) = async_channel::unbounded::<Vec<PathBuf>>();
 
-        // Background automatic file tree refresh listener with debouncing
+        // Debounce + coalesce raw filesystem events on a dedicated OS thread
+        // (never the UI thread — the old handler slept a blocking 150 ms
+        // twice inside the foregound executor). Only the *changed path* is
+        // forwarded; the UI-side reload is then scoped to the affected
+        // directory instead of rescanning the whole tree.
+        std::thread::spawn(move || {
+            let rx = fs_event_rx;
+            loop {
+                let Ok(first) = rx.recv_blocking() else { break };
+                let mut paths = vec![first];
+                while let Ok(more) = rx.try_recv() {
+                    paths.push(more);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(120));
+                while let Ok(more) = rx.try_recv() {
+                    paths.push(more);
+                }
+
+                // The only directory level whose entry set can have changed
+                // is the parent of each changed path (or the path itself
+                // when it is a directory).
+                let mut dirs: HashSet<PathBuf> = HashSet::new();
+                for p in paths {
+                    if p.is_dir() {
+                        dirs.insert(p);
+                    } else if let Some(parent) = p.parent() {
+                        dirs.insert(parent.to_path_buf());
+                    }
+                }
+                if !dirs.is_empty() {
+                    let _ = fs_reload_tx.try_send(dirs.into_iter().collect());
+                }
+            }
+        });
+
+        // Apply debounced, scoped reloads on the UI thread.
         cx.spawn({
-            let rx = fs_event_rx.clone();
+            let rx = fs_reload_rx.clone();
             async move |this, cx| {
-                while let Ok(()) = rx.recv().await {
-                    while rx.try_recv().is_ok() {}
-                    std::thread::sleep(std::time::Duration::from_millis(150));
-                    while rx.try_recv().is_ok() {}
-
+                while let Ok(dirs) = rx.recv().await {
                     let _ = this.update(cx, |workspace, cx| {
-                        if let Some(root) = workspace.root.clone() {
-                            workspace.tree = reload_dir_preserving(&root, &workspace.tree);
-                            cx.notify();
+                        for dir in dirs {
+                            workspace.reload_dir(&dir);
                         }
+                        cx.notify();
                     });
                 }
             }
@@ -191,6 +232,7 @@ impl Workspace {
         Self {
             root: None,
             tree: Vec::new(),
+            root_display: String::new(),
             selected_path: None,
             explorer_section_expanded: true,
             inline_creating: None,
@@ -229,7 +271,7 @@ impl Workspace {
                 let star = if tab.dirty { " ●" } else { "" };
                 let name = display_name(path);
                 match &self.root {
-                    Some(root) => format!("{name}{star} — {}", display_name(root)),
+                    Some(_) => format!("{name}{star} — {}", self.root_display),
                     None => format!("{name}{star}"),
                 }
             } else if tab.untitled {
@@ -290,24 +332,27 @@ impl Workspace {
 
     pub(crate) fn load_root(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.root = Some(path.clone());
+        self.root_display = display_name(&path);
         self.tree = load_dir(&path);
         self.explorer_section_expanded = true;
         self.selected_path = None;
         self.inline_creating = None;
         self.status = format!("Opened folder {}", display_name(&path));
 
-        // Start filesystem watcher on the root directory
+        // Start filesystem watcher on the root directory. Each relevant
+        // changed path is forwarded (not just a "something changed" flag) so
+        // the reload on the UI side can be scoped to the affected directory.
         let tx = self.fs_event_tx.clone();
         let watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
             if let Ok(event) = res {
-                let should_notify = event.paths.iter().any(|p| {
+                for p in event.paths {
                     let path_str = p.to_string_lossy();
-                    !path_str.contains("target")
+                    let relevant = !path_str.contains("target")
                         && !path_str.contains(".git")
-                        && !path_str.contains(".DS_Store")
-                });
-                if should_notify {
-                    let _ = tx.try_send(());
+                        && !path_str.contains(".DS_Store");
+                    if relevant {
+                        let _ = tx.try_send(p);
+                    }
                 }
             }
         });
@@ -610,26 +655,38 @@ impl Workspace {
                     .open_document(&path, lang_id, &text, root_path.as_deref());
 
                 // Subscribe to change events - also handles promoting preview to permanent
-                let lsp_clone = self.lsp.clone();
                 let path_clone = path.clone();
                 let lang_str = lang_id.to_string();
                 let editor_ent = editor.clone();
 
                 cx.subscribe(&editor, move |this, _state, event: &InputEvent, cx| {
                     if matches!(event, InputEvent::Change) {
+                        let mut ui_changed = false;
                         if let Some(tab) = this.tabs.get_mut(this.active_tab) {
                             if !tab.dirty {
                                 tab.dirty = true;
+                                ui_changed = true;
                             }
                             // VS Code: editing a preview tab promotes it to permanent
                             if tab.preview {
                                 tab.preview = false;
+                                ui_changed = true;
                             }
+                        }
+                        // Talk to the language server only when one exists for
+                        // this language; plain-text / too-large files skip the
+                        // whole-buffer read that used to run per keystroke.
+                        let mut lsp = this.lsp.lock().unwrap();
+                        if lsp.has_client(&lang_str) {
                             let text = editor_ent.read(cx).value().to_string();
-                            lsp_clone
-                                .lock()
-                                .unwrap()
-                                .change_document(&path_clone, &lang_str, &text);
+                            lsp.change_document(&path_clone, &lang_str, &text);
+                        }
+                        // The editor view repaints itself. Only repaint the
+                        // workspace chrome (dirty dot / preview promotion)
+                        // when it actually changed, so steady-state typing
+                        // doesn't rebuild the whole window (explorer, tab
+                        // bar, status bar) on every keystroke.
+                        if ui_changed {
                             cx.notify();
                         }
                     }
@@ -770,6 +827,39 @@ impl Workspace {
             self.status = "Explorer refreshed".into();
             cx.notify();
         }
+    }
+
+    /// Reload a single directory level of the explorer tree after a
+    /// filesystem change, preserving expanded state of deeper levels.
+    /// No-op when the directory isn't currently visible in the tree —
+    /// previously *every* fs event triggered a full recursive rescan.
+    pub(crate) fn reload_dir(&mut self, dir: &Path) {
+        let Some(root) = self.root.as_ref() else {
+            return;
+        };
+        if dir == root.as_path() {
+            self.tree = reload_dir_preserving(root, &self.tree);
+            return;
+        }
+        fn apply(nodes: &mut [TreeNode], dir: &Path) -> bool {
+            for n in nodes {
+                if n.path == dir {
+                    if n.is_dir {
+                        if n.expanded {
+                            n.children = reload_dir_preserving(&n.path, &n.children);
+                        } else {
+                            n.children = load_dir(&n.path);
+                        }
+                    }
+                    return true;
+                }
+                if apply(&mut n.children, dir) {
+                    return true;
+                }
+            }
+            false
+        }
+        apply(&mut self.tree, dir);
     }
 
     pub(crate) fn collapse_all_folders(&mut self, cx: &mut Context<Self>) {
@@ -1002,8 +1092,13 @@ impl Workspace {
         diagnostics: Vec<lsp_types::Diagnostic>,
         cx: &mut Context<Self>,
     ) {
+        // Wrap once: storing the bundle and copying it into each matching
+        // editor both borrow from the same shared `Arc` payload, so an LSP
+        // publish no longer full-clones the vector at two independent sites.
+        let shared = Arc::new(diagnostics);
+
         self.diagnostics_by_path
-            .insert(path.to_path_buf(), diagnostics.clone());
+            .insert(path.to_path_buf(), Arc::clone(&shared));
 
         let mut updated = false;
         let mut active_msg = None;
@@ -1015,12 +1110,12 @@ impl Workspace {
                     tab.editor.update(cx, |state, _cx| {
                         if let Some(diag_set) = state.diagnostics_mut() {
                             diag_set.clear();
-                            for d in &diagnostics {
+                            for d in shared.iter() {
                                 diag_set.push(d.clone());
                             }
                             updated = true;
                             if idx == active_tab_idx {
-                                if let Some(first) = diagnostics.first() {
+                                if let Some(first) = shared.first() {
                                     active_msg = Some(first.message.clone());
                                 }
                             }
