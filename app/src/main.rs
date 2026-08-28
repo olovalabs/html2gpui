@@ -32,16 +32,15 @@ fn main() {
         .with_assets(CombinedAssets)
         .run(|cx: &mut App| {
             gpui_component::init(cx);
+            // Windows/Linux keymap style (like Zed's default-linux.json):
+            // `ctrl` modifiers only. On Windows GPUI maps `cmd` to the
+            // Windows key, which produced wrong "Win+X" menu labels.
             cx.bind_keys([
                 KeyBinding::new("ctrl-s", Save, None),
-                KeyBinding::new("cmd-s", Save, None),
                 KeyBinding::new("ctrl-n", NewFile, None),
-                KeyBinding::new("cmd-n", NewFile, None),
                 KeyBinding::new("ctrl-o", OpenFile, None),
-                KeyBinding::new("cmd-o", OpenFile, None),
                 KeyBinding::new("ctrl-`", ToggleTerminal, None),
                 KeyBinding::new("ctrl-j", ToggleTerminal, None),
-                KeyBinding::new("cmd-j", ToggleTerminal, None),
                 KeyBinding::new("ctrl-b", ToggleSidebar, None),
                 KeyBinding::new("ctrl-shift-e", ShowExplorer, None),
                 KeyBinding::new("ctrl-shift-f", ShowSearch, None),
@@ -49,28 +48,17 @@ fn main() {
                 KeyBinding::new("ctrl-shift-x", ShowExtensions, None),
                 // Tab keybindings
                 KeyBinding::new("ctrl-w", CloseTab, None),
-                KeyBinding::new("cmd-w", CloseTab, None),
                 KeyBinding::new("ctrl-tab", NextTab, None),
                 KeyBinding::new("ctrl-shift-tab", PrevTab, None),
-                KeyBinding::new("cmd-alt-right", NextTab, None),
-                KeyBinding::new("cmd-alt-left", PrevTab, None),
                 // Font zoom keybindings (Zed-compatible)
                 KeyBinding::new("ctrl-=", IncreaseFontSize, None),
                 KeyBinding::new("ctrl-+", IncreaseFontSize, None),
                 KeyBinding::new("ctrl-shift-+", IncreaseFontSize, None),
                 KeyBinding::new("ctrl-shift-=", IncreaseFontSize, None),
-                KeyBinding::new("cmd-=", IncreaseFontSize, None),
-                KeyBinding::new("cmd-+", IncreaseFontSize, None),
-                KeyBinding::new("cmd-shift-+", IncreaseFontSize, None),
-                KeyBinding::new("cmd-shift-=", IncreaseFontSize, None),
                 KeyBinding::new("ctrl--", DecreaseFontSize, None),
                 KeyBinding::new("ctrl-_", DecreaseFontSize, None),
-                KeyBinding::new("cmd--", DecreaseFontSize, None),
-                KeyBinding::new("cmd-_", DecreaseFontSize, None),
                 KeyBinding::new("ctrl-0", ResetFontSize, None),
-                KeyBinding::new("cmd-0", ResetFontSize, None),
                 KeyBinding::new("ctrl-alt-c", CopyDiagnostic, None),
-                KeyBinding::new("cmd-alt-c", CopyDiagnostic, None),
             ]);
 
             // Start on GitHub Dark and paint tree-sitter captures with the

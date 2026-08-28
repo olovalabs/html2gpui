@@ -144,16 +144,26 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &CopyDiagnostic, _, cx| {
                 this.copy_active_diagnostic(cx);
             }))
-            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                if event.keystroke.modifiers.control || event.keystroke.modifiers.platform {
-                    match event.keystroke.key.as_str() {
-                        "=" | "+" => this.increase_font_size(cx),
-                        "-" | "_" => this.decrease_font_size(cx),
-                        "0" => this.reset_font_size(cx),
-                        _ => {}
-                    }
-                }
-            }))
+            // Zed-style key context for workspace-level bindings. Note: do NOT
+            // put `track_focus` on this full-window div — its hitbox breaks
+            // the platform's client-decoration hit-testing, which kills
+            // title-bar dragging on Windows. The focus target lives on the
+            // tiny `workspace-focus-catcher` element below instead.
+            .key_context("Workspace")
+            // Invisible 1x1 focus target: when no editor or terminal is
+            // focused, the workspace holds focus here so global keybindings
+            // always have a dispatch path (Zed keeps an equivalent workspace
+            // focus handle). 1x1px so its hitbox can't interfere with the
+            // title bar or window controls.
+            .child(
+                div()
+                    .id("workspace-focus-catcher")
+                    .track_focus(&self.focus_handle)
+                    .absolute()
+                    .bottom_0()
+                    .left_0()
+                    .size(px(1.0)),
+            )
             .child(ui::titlebar::render_titlebar(&title, &t, theme_ix))
             .child(
                 div()

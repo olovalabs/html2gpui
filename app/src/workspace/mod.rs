@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use gpui::{AppContext, Context, Entity, Window};
+use gpui::{AppContext, Context, Entity, FocusHandle, Window};
 use gpui_component::input::{InputEvent, InputState, TabSize};
 use notify::Watcher as _;
 
@@ -95,10 +95,19 @@ pub(crate) struct Workspace {
     pub(crate) tabs: Vec<OpenTab>,
     /// Index of the currently active tab
     pub(crate) active_tab: usize,
+    /// Workspace-level focus target (Zed-style). The workspace always holds
+    /// focus when no editor/terminal does, so global keybindings always have
+    /// a dispatch path and shortcuts never go dead.
+    pub(crate) focus_handle: FocusHandle,
 }
 
 impl Workspace {
-    pub(crate) fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // Zed focuses the workspace on activation so keybindings always have
+        // a focused element to dispatch through, even on the welcome screen.
+        let focus_handle = cx.focus_handle();
+        focus_handle.focus(window);
+
         let lsp_mgr = LspManager::new();
         let rx = lsp_mgr.event_receiver();
         let lsp = Arc::new(Mutex::new(lsp_mgr));
@@ -169,6 +178,7 @@ impl Workspace {
             _watcher: None,
             tabs: Vec::new(),
             active_tab: 0,
+            focus_handle,
         }
     }
 
@@ -329,22 +339,49 @@ impl Workspace {
     }
 
     pub(crate) fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.show_terminal = !self.show_terminal;
-        if self.show_terminal && self.terminal.is_none() {
+        if self.show_terminal {
+            self.hide_terminal(window, cx);
+            return;
+        }
+
+        self.show_terminal = true;
+        if self.terminal.is_none() {
             let root = self.root.clone();
             let term = cx.new(|cx| crate::terminal::Terminal::new(root.as_deref(), window, cx));
             self.terminal = Some(term);
         }
-        if self.show_terminal {
-            if let Some(term) = &self.terminal {
-                let focus = term.read(cx).focus_handle(cx);
-                focus.focus(window);
-            }
-            self.status = "Terminal active".into();
-        } else {
-            self.status = "Terminal hidden".into();
+        if let Some(term) = &self.terminal {
+            let focus = term.read(cx).focus_handle(cx);
+            focus.focus(window);
         }
+        self.status = "Terminal active".into();
         cx.notify();
+    }
+
+    /// Hide the terminal panel and hand focus back to the active editor (or
+    /// the workspace itself). Like Zed's dock toggle, focus is never left on
+    /// a panel that is about to disappear, otherwise keybindings go dead.
+    pub(crate) fn hide_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_terminal = false;
+        self.status = "Terminal hidden".into();
+        self.focus_active_editor_or_self(window, cx);
+        cx.notify();
+    }
+
+    /// Focus the active tab's editor, falling back to the workspace focus
+    /// handle when no editor is open. Keeps the dispatch path alive for
+    /// global keybindings at all times.
+    pub(crate) fn focus_active_editor_or_self(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(tab) = self.tabs.get(self.active_tab) {
+            let editor = tab.editor.clone();
+            editor.update(cx, |state, cx| state.focus(window, cx));
+        } else {
+            window.focus(&self.focus_handle);
+        }
     }
 
     pub(crate) fn toggle_activity(&mut self, activity: Activity, cx: &mut Context<Self>) {
@@ -903,7 +940,7 @@ impl Workspace {
     }
 
     /// Close a tab by index
-    pub(crate) fn close_tab(&mut self, index: usize, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(closed_tab) = self.tabs.get(index) {
             if let Some(p) = &closed_tab.path {
                 if let Some(lang_id) = lang::language_for(p) {
@@ -916,6 +953,9 @@ impl Workspace {
         if self.tabs.len() == 1 {
             self.tabs.remove(0);
             self.active_tab = 0;
+            // The closed editor held focus — restore it so keybindings keep
+            // working on the welcome screen.
+            window.focus(&self.focus_handle);
             cx.notify();
             return;
         }
@@ -931,6 +971,8 @@ impl Workspace {
             self.active_tab = self.tabs.len().saturating_sub(1);
         }
 
+        // Hand keyboard focus to the editor that is now active.
+        self.focus_active_editor_or_self(window, cx);
         cx.notify();
     }
 
@@ -982,24 +1024,27 @@ impl Workspace {
         self.close_tab(self.active_tab, window, cx);
     }
 
-    pub(crate) fn handle_next_tab(&mut self, _: &crate::actions::NextTab, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn handle_next_tab(&mut self, _: &crate::actions::NextTab, window: &mut Window, cx: &mut Context<Self>) {
         if self.tabs.len() > 1 {
             self.active_tab = (self.active_tab + 1) % self.tabs.len();
+            self.focus_active_editor_or_self(window, cx);
             cx.notify();
         }
     }
 
-    pub(crate) fn handle_prev_tab(&mut self, _: &crate::actions::PrevTab, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn handle_prev_tab(&mut self, _: &crate::actions::PrevTab, window: &mut Window, cx: &mut Context<Self>) {
         if self.tabs.len() > 1 {
             self.active_tab = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
+            self.focus_active_editor_or_self(window, cx);
             cx.notify();
         }
     }
 
     /// Switch to a specific tab by index (called when tab is clicked)
-    pub(crate) fn handle_switch_tab(&mut self, action: &crate::actions::SwitchTab, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn handle_switch_tab(&mut self, action: &crate::actions::SwitchTab, window: &mut Window, cx: &mut Context<Self>) {
         if action.index < self.tabs.len() {
             self.active_tab = action.index;
+            self.focus_active_editor_or_self(window, cx);
             cx.notify();
         }
     }

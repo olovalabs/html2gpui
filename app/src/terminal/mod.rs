@@ -167,10 +167,8 @@ pub fn render_terminal(
                         .text_size(px(12.0))
                         .text_color(rgba(t.text_muted))
                         .child("×")
-                        .on_click(cx.listener(move |this, _, _window, cx| {
-                            this.show_terminal = false;
-                            this.status = "Terminal hidden".into();
-                            cx.notify();
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.hide_terminal(window, cx);
                         })),
                 ),
         )
