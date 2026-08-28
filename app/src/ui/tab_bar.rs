@@ -2,7 +2,7 @@
 //! Provides VS Code-style tabs with proper positioning and click handling.
 
 use gpui::prelude::*;
-use gpui::{div, px, rgba, Context, IntoElement};
+use gpui::{div, px, rgba, svg, Context, IntoElement};
 use crate::workspace::{OpenTab, Workspace};
 use crate::theme::Colors;
 
@@ -22,15 +22,18 @@ fn render_tab_content(
     t: &Colors,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
-    let label = tab
-        .path
-        .as_ref()
-        .map(|p| {
-            p.file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "Untitled".to_string())
-        })
-        .unwrap_or_else(|| "Untitled".to_string());
+    let label = if tab.is_settings {
+        "Settings".to_string()
+    } else {
+        tab.path
+            .as_ref()
+            .map(|p| {
+                p.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "Untitled".to_string())
+            })
+            .unwrap_or_else(|| "Untitled".to_string())
+    };
 
     // Colors based on active state
     let bg = if is_active { t.tab_active_bg } else { t.tab_inactive_bg };
@@ -127,6 +130,19 @@ fn render_tab_content(
                         .flex_none()
                 })
                 .when(!tab.dirty, |d| d.w(px(0.0))),
+            // Icon if settings tab
+            div()
+                .when(tab.is_settings, |d| {
+                    d.child(
+                        svg()
+                            .path("ui_icons/settings-gear_tint.svg")
+                            .w(px(14.0))
+                            .h(px(14.0))
+                            .text_color(rgba(fg))
+                            .flex_none(),
+                    )
+                })
+                .when(!tab.is_settings, |d| d.w(px(0.0))),
             // Tab label - italic for preview tabs (VS Code style)
             div()
                 .flex_1()

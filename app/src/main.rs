@@ -39,6 +39,7 @@ fn main() {
                 KeyBinding::new("ctrl-s", Save, None),
                 KeyBinding::new("ctrl-n", NewFile, None),
                 KeyBinding::new("ctrl-o", OpenFile, None),
+                KeyBinding::new("ctrl-,", OpenSettings, None),
                 KeyBinding::new("ctrl-`", ToggleTerminal, None),
                 KeyBinding::new("ctrl-j", ToggleTerminal, None),
                 KeyBinding::new("ctrl-shift-`", NewTerminal, None),

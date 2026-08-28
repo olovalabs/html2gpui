@@ -17,17 +17,19 @@ use crate::lang;
 use crate::lsp::{LspEvent, LspManager};
 use crate::theme;
 
-/// Represents a single open tab with its own editor buffer
+/// Represents a single open tab with its own editor buffer or special view
 #[derive(Clone)]
 pub struct OpenTab {
     pub path: Option<PathBuf>,
-    pub editor: Entity<InputState>,
+    pub editor: Option<Entity<InputState>>,
     pub dirty: bool,
     pub untitled: bool,
     /// True if this is a preview tab (will be replaced when opening another file)
     /// VS Code behavior: clicking a file opens it in preview mode,
     /// editing promotes it to a permanent tab
     pub preview: bool,
+    /// True if this tab represents the VS Code Settings page
+    pub is_settings: bool,
 }
 
 /// Which sidebar panel is active.
@@ -264,10 +266,15 @@ impl Workspace {
         &themes[self.theme_ix.min(themes.len() - 1)]
     }
 
-    /// Window/title-bar text: "file ● — folder", "folder" or the app name.
+    /// Window/title-bar text: "file ● — folder", "folder", "Settings", or the app name.
     pub(crate) fn title(&self) -> String {
         if let Some(tab) = self.tabs.get(self.active_tab) {
-            if let Some(path) = &tab.path {
+            if tab.is_settings {
+                match &self.root {
+                    Some(root) => format!("Settings — {}", display_name(root)),
+                    None => "Settings — gpui editor".to_string(),
+                }
+            } else if let Some(path) = &tab.path {
                 let star = if tab.dirty { " ●" } else { "" };
                 let name = display_name(path);
                 match &self.root {
@@ -293,7 +300,7 @@ impl Workspace {
 
     /// Get the active tab's editor
     pub fn active_editor(&self) -> Option<&Entity<InputState>> {
-        self.tabs.get(self.active_tab).map(|t| &t.editor)
+        self.tabs.get(self.active_tab).and_then(|t| t.editor.as_ref())
     }
 
     /// Get the active tab's file path
@@ -408,10 +415,11 @@ impl Workspace {
 
         self.tabs.push(OpenTab {
             path: None,
-            editor,
+            editor: Some(editor),
             dirty: false,
             untitled: true,
             preview: false, // New file tabs are permanent
+            is_settings: false,
         });
         self.active_tab = self.tabs.len() - 1;
         self.status = "Untitled file — Ctrl+S to save".into();
@@ -554,11 +562,13 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if let Some(tab) = self.tabs.get(self.active_tab) {
-            let editor = tab.editor.clone();
-            editor.update(cx, |state, cx| state.focus(window, cx));
-        } else {
-            window.focus(&self.focus_handle);
+            if let Some(editor) = &tab.editor {
+                let editor = editor.clone();
+                editor.update(cx, |state, cx| state.focus(window, cx));
+                return;
+            }
         }
+        window.focus(&self.focus_handle);
     }
 
     pub(crate) fn toggle_activity(&mut self, activity: Activity, cx: &mut Context<Self>) {
@@ -700,16 +710,18 @@ impl Workspace {
                         tab.dirty = false;
                         tab.untitled = false;
                         tab.preview = true; // New file is still in preview mode
-                        tab.editor = editor;
+                        tab.is_settings = false;
+                        tab.editor = Some(editor);
                     }
                 } else {
                     // ADD a new tab in preview mode (VS Code style)
                     self.tabs.push(OpenTab {
                         path: Some(path.clone()),
-                        editor,
+                        editor: Some(editor),
                         dirty: false,
                         untitled: false,
                         preview: true, // New tabs start as preview
+                        is_settings: false,
                     });
                     self.active_tab = self.tabs.len() - 1;
                 }
@@ -735,6 +747,11 @@ impl Workspace {
             }
         };
 
+        // If settings tab, nothing to save
+        if tab.is_settings {
+            return;
+        }
+
         // If untitled, fall back to Save As
         if tab.path.is_none() {
             self.save_as(cx);
@@ -743,7 +760,10 @@ impl Workspace {
 
         // Save the file
         let path = tab.path.clone().unwrap();
-        let text = tab.editor.read(cx).value().to_string();
+        let Some(editor) = &tab.editor else {
+            return;
+        };
+        let text = editor.read(cx).value().to_string();
         match std::fs::write(&path, text.as_bytes()) {
             Ok(()) => {
                 tab.dirty = false;
@@ -769,7 +789,13 @@ impl Workspace {
                 Some(t) => t,
                 None => return,
             };
-            tab.editor.read(cx).value().to_string()
+            if tab.is_settings {
+                return;
+            }
+            let Some(editor) = &tab.editor else {
+                return;
+            };
+            editor.read(cx).value().to_string()
         };
 
         match std::fs::write(&path, text.as_bytes()) {
@@ -780,9 +806,12 @@ impl Workspace {
                     tab.path = Some(path.clone());
                     tab.untitled = false;
                     tab.dirty = false;
-                    tab.editor.update(cx, |state, cx| {
-                        state.set_highlighter(lang_id, cx);
-                    });
+                    tab.is_settings = false;
+                    if let Some(editor) = &tab.editor {
+                        editor.update(cx, |state, cx| {
+                            state.set_highlighter(lang_id, cx);
+                        });
+                    }
                 }
                 self.selected_path = Some(path.clone());
                 if let Some(root) = &self.root {
@@ -1107,20 +1136,22 @@ impl Workspace {
         for (idx, tab) in self.tabs.iter_mut().enumerate() {
             if let Some(tab_path) = &tab.path {
                 if crate::lsp::paths_match(tab_path, path) {
-                    tab.editor.update(cx, |state, _cx| {
-                        if let Some(diag_set) = state.diagnostics_mut() {
-                            diag_set.clear();
-                            for d in shared.iter() {
-                                diag_set.push(d.clone());
-                            }
-                            updated = true;
-                            if idx == active_tab_idx {
-                                if let Some(first) = shared.first() {
-                                    active_msg = Some(first.message.clone());
+                    if let Some(editor) = &tab.editor {
+                        editor.update(cx, |state, _cx| {
+                            if let Some(diag_set) = state.diagnostics_mut() {
+                                diag_set.clear();
+                                for d in shared.iter() {
+                                    diag_set.push(d.clone());
+                                }
+                                updated = true;
+                                if idx == active_tab_idx {
+                                    if let Some(first) = shared.first() {
+                                        active_msg = Some(first.message.clone());
+                                    }
                                 }
                             }
-                        }
-                    });
+                        });
+                    }
                 }
             }
         }
@@ -1153,6 +1184,25 @@ impl Workspace {
             }
         }
         self.status = "No active problem to copy".into();
+        cx.notify();
+    }
+
+    /// Open or focus the VS Code-style Settings tab
+    pub(crate) fn open_settings(&mut self, cx: &mut Context<Self>) {
+        if let Some(idx) = self.tabs.iter().position(|t| t.is_settings) {
+            self.active_tab = idx;
+        } else {
+            self.tabs.push(OpenTab {
+                path: None,
+                editor: None,
+                dirty: false,
+                untitled: false,
+                preview: false,
+                is_settings: true,
+            });
+            self.active_tab = self.tabs.len() - 1;
+        }
+        self.status = "Settings".into();
         cx.notify();
     }
 

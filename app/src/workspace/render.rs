@@ -8,7 +8,7 @@ use gpui::{
 use gpui_component::input::Input;
 
 use crate::actions::*;
-use crate::assets::SANS_FONT;
+
 use crate::theme::Colors;
 use crate::ui;
 use crate::workspace::CreatingKind;
@@ -70,6 +70,7 @@ impl Render for Workspace {
         // Tab-related data
         let tabs = &self.tabs;
         let active_tab = self.active_tab;
+        let is_settings = self.tabs.get(active_tab).map(|t| t.is_settings).unwrap_or(false);
         // Get the active editor from the current tab
         let editor = self.active_editor();
 
@@ -77,10 +78,11 @@ impl Render for Workspace {
             .size_full()
             .flex()
             .flex_col()
-            .font_family(SANS_FONT)
             .bg(rgba(t.background))
             .text_color(rgba(t.text))
-            .text_size(px(13.5))
+            .font_family(crate::assets::SANS_FONT)
+            .cursor_default()
+            // Commands handled directly by the workspace.
             .on_action(cx.listener(|this, _: &Save, window, cx| this.save(window, cx)))
             .on_action(cx.listener(|this, _: &Quit, _, cx| this.quit(cx)))
             .on_action(cx.listener(|this, _: &ShowExplorer, _, cx| {
@@ -113,6 +115,9 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|this, _: &OpenFolder, window, cx| {
                 this.open_folder_dialog(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenSettings, _, cx| {
+                this.open_settings(cx);
             }))
             .on_action(cx.listener(|this, action: &SelectTheme, window, cx| {
                 this.apply_theme(action.ix, window, cx);
@@ -259,10 +264,12 @@ impl Render for Workspace {
                                     .when(!tabs.is_empty(), |d| {
                                         d.child(ui::tab_bar::render_tab_bar(tabs, active_tab, &t, cx))
                                     })
-                                    // Editor area
+                                    // Editor area / Settings area / Welcome
                                     .when(welcome, |d| d.child(ui::welcome::render_welcome(&t, cx)))
                                     .when(!welcome, |d| {
-                                        if let Some(editor) = editor {
+                                        if is_settings {
+                                            d.child(ui::settings::render_settings(&t, theme_ix, font_size, cx))
+                                        } else if let Some(editor) = editor {
                                             d.child(
                                                 div()
                                                     .flex_1()

@@ -14,6 +14,7 @@ actions!(
         NewFile,
         OpenFile,
         OpenFolder,
+        OpenSettings,
         ShowExplorer,
         ShowSearch,
         ShowGit,

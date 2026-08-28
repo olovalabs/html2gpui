@@ -3,7 +3,6 @@
 
 use gpui::{div, prelude::*, px, rgba, svg, Context, IntoElement, SharedString, Window};
 
-use crate::theme;
 use crate::workspace::{Activity, Workspace};
 
 pub(crate) fn render_activity_bar(
@@ -64,10 +63,8 @@ pub(crate) fn render_activity_bar(
                 "act-settings",
                 "ui_icons/settings-gear_tint.svg",
                 t,
-                move |this, _, window, cx| {
-                    // Settings cycles to the next theme for now.
-                    let next = (this.theme_ix + 1) % theme::all().len();
-                    this.apply_theme(next, window, cx);
+                move |this, _, _window, cx| {
+                    this.open_settings(cx);
                 },
                 cx,
             )),
@@ -90,6 +87,7 @@ fn activity_icon(
 
     div()
         .id(SharedString::from(id))
+        .group(SharedString::from(id))
         .w_full()
         .h(px(48.0))
         .flex()
@@ -112,7 +110,8 @@ fn activity_icon(
                 .path(svg_path)
                 .w(px(24.0))
                 .h(px(24.0))
-                .text_color(rgba(icon_color)),
+                .text_color(rgba(icon_color))
+                .group_hover(SharedString::from(id), |s| s.text_color(rgba(0xffffffff))),
         )
         .on_click(cx.listener(move |this, _, _, cx| this.toggle_activity(which, cx)))
 }
@@ -126,14 +125,21 @@ fn activity_static_icon(
 ) -> impl IntoElement {
     div()
         .id(SharedString::from(id))
+        .group(SharedString::from(id))
         .w_full()
         .h(px(48.0))
         .flex()
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .text_color(rgba(0x858585ff))
-        .hover(|s| s.bg(rgba(t.ghost_hover)).text_color(rgba(0xffffffff)))
-        .child(svg().path(svg_path).w(px(24.0)).h(px(24.0)))
+        .hover(|s| s.bg(rgba(t.ghost_hover)))
+        .child(
+            svg()
+                .path(svg_path)
+                .w(px(24.0))
+                .h(px(24.0))
+                .text_color(rgba(0x858585ff))
+                .group_hover(SharedString::from(id), |s| s.text_color(rgba(0xffffffff))),
+        )
         .on_click(cx.listener(action))
 }

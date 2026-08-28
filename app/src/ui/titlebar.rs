@@ -42,6 +42,8 @@ pub(crate) fn render_titlebar(title: &str, t: &Colors, theme_ix: usize) -> impl 
                         .separator()
                         .menu("Save", Box::new(Save))
                         .separator()
+                        .menu("Preferences: Settings (Ctrl+,)", Box::new(OpenSettings))
+                        .separator()
                         .menu("Exit", Box::new(Quit))
                 }))
                 .child(menu_btn("m-edit", "Edit", t, |menu, _, _| {
