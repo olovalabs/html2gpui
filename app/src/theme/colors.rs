@@ -209,11 +209,8 @@ pub(crate) const FALLBACKS: &[(&str, u32)] = &[
     ("vc_added", 0x27a657ff),
     ("vc_modified", 0xd3b020ff),
     ("vc_deleted", 0xe06c76ff),
-    ("tab_active_bg", 0x1e1e1eff),
-    ("tab_inactive_bg", 0x252526ff),
-    ("tab_active_fg", 0xccccccff),
-    ("tab_inactive_fg", 0x808080ff),
 ];
+
 
 /// Parse `#RRGGBB` and `#RRGGBBAA` (Zed files use the latter) into RGBA8+alpha.
 pub(crate) fn parse_hex(s: &str) -> Option<u32> {

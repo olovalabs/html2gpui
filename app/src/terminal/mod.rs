@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use gpui::{
     div, prelude::*, px, rgba, svg, Context, Edges, Entity, FocusHandle, IntoElement, Window,
 };
-use gpui_terminal::{ColorPalette, TerminalConfig, TerminalView};
+use gpui_terminal::{TerminalConfig, TerminalView};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
 use crate::assets::MONO_FONT;
@@ -23,10 +23,13 @@ pub struct Terminal {
     pub name: String,
 }
 
+
+
 impl Terminal {
     pub fn new(
         root_dir: Option<&Path>,
         name: String,
+        palette: gpui_terminal::ColorPalette,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -75,7 +78,7 @@ impl Terminal {
             scrollback: 10000,
             line_height_multiplier: 1.2,
             padding: Edges::all(px(6.0)),
-            colors: ColorPalette::default(),
+            colors: palette,
         };
 
         let pty_for_resize = pty_master.clone();
@@ -101,6 +104,15 @@ impl Terminal {
             view,
             name,
         }
+    }
+
+    /// Dynamically update the terminal color palette when the active theme changes.
+    pub fn set_theme(&mut self, palette: &gpui_terminal::ColorPalette, cx: &mut Context<Self>) {
+        self.view.update(cx, |view, cx| {
+            let mut config = view.config().clone();
+            config.colors = palette.clone();
+            view.update_config(config, cx);
+        });
     }
 
     pub fn focus_handle(&self, cx: &gpui::App) -> FocusHandle {
@@ -138,6 +150,7 @@ pub fn render_terminal_panel(
                 .w_full()
                 .min_h(px(0.0))
                 .overflow_hidden()
+                .bg(rgba(t.terminal_bg))
                 .when_some(active_view, |d, view| d.child(view)),
         )
 }

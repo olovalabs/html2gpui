@@ -1,4 +1,4 @@
-//! Tab bar component with Dark Islands floating pill and top-accent active styling.
+//! Tab bar component with dynamic theme support and clean active tab styling.
 
 use gpui::prelude::*;
 use gpui::{div, px, rgba, Context, FontWeight, IntoElement, SharedString};
@@ -11,7 +11,7 @@ use crate::workspace::{OpenTab, Workspace};
 /// Tab bar height in pixels
 const TAB_HEIGHT: f32 = 36.0;
 
-/// Renders a single tab matching the Dark Islands screenshot design
+/// Renders a single tab matching the active theme styling
 fn render_tab_content(
     tab: &OpenTab,
     index: usize,
@@ -50,9 +50,9 @@ fn render_tab_content(
     };
 
     let text_color = if is_active {
-        0xf59e0bff // Warm gold / orange for active tab text in Dark Islands
+        t.tab_active_fg
     } else {
-        0x94a3b8ff // Muted slate for inactive tabs
+        t.tab_inactive_fg
     };
 
     let mut tab_div = div()
@@ -73,13 +73,13 @@ fn render_tab_content(
     if is_active {
         tab_div = tab_div
             .h(px(TAB_HEIGHT))
-            .bg(rgba(0x16181dff))
+            .bg(rgba(t.tab_active_bg))
             .border_t(px(2.0))
-            .border_color(rgba(0xff6f59ff)) // Coral / orange top accent line
+            .border_color(rgba(t.text_accent))
             .border_r_1()
-            .border_color(rgba(0x232731ff))
+            .border_color(rgba(t.border_variant))
             .border_l_1()
-            .border_color(rgba(0x232731ff))
+            .border_color(rgba(t.border_variant))
             .px(px(10.0));
     } else {
         tab_div = tab_div
@@ -87,11 +87,11 @@ fn render_tab_content(
             .my(px(5.0))
             .mx(px(3.0))
             .rounded(px(6.0))
-            .bg(rgba(0x16181dff))
+            .bg(rgba(t.tab_inactive_bg))
             .border_1()
-            .border_color(rgba(0x282c35ff))
+            .border_color(rgba(t.border_variant))
             .px(px(8.0))
-            .hover(|h| h.bg(rgba(0x1e222aff)));
+            .hover(|h| h.bg(rgba(t.element_hover)));
     }
 
     // Close button
@@ -108,18 +108,12 @@ fn render_tab_content(
             this.close_tab_at_index(index, cx);
         }));
 
-    if !is_active {
-        close_btn = close_btn
-            .bg(rgba(0x232732ff))
-            .hover(|h| h.bg(rgba(0x353b49ff)));
-    } else {
-        close_btn = close_btn.hover(|h| h.bg(rgba(t.element_hover)));
-    }
+    close_btn = close_btn.hover(|h| h.bg(rgba(t.element_hover)));
 
     close_btn = close_btn.child(
         div()
             .text_size(px(10.5))
-            .text_color(rgba(if is_active { 0xccccccff } else { 0x8b949eff }))
+            .text_color(rgba(if is_active { t.tab_active_fg } else { t.tab_inactive_fg }))
             .child("✕"),
     );
 
@@ -144,7 +138,7 @@ fn render_tab_content(
         div()
             .text_size(px(11.0))
             .font_weight(FontWeight::BOLD)
-            .text_color(rgba(0xf59e0bff))
+            .text_color(rgba(t.vc_modified))
             .child("M")
             .into_any_element()
     } else {
@@ -170,9 +164,9 @@ pub fn render_tab_bar(
         .flex_row()
         .items_center()
         .h(px(TAB_HEIGHT))
-        .bg(rgba(0x0e1014ff))
+        .bg(rgba(t.tab_bar))
         .border_b_1()
-        .border_color(rgba(0x232731ff))
+        .border_color(rgba(t.border_variant))
         .w_full()
         .px(px(4.0))
         .overflow_hidden()
@@ -181,3 +175,4 @@ pub fn render_tab_bar(
             render_tab_content(tab, idx, is_active, t, cx)
         }))
 }
+

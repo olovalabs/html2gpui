@@ -400,6 +400,13 @@ impl Workspace {
         gpui_component::Theme::global_mut(cx).highlight_theme = Arc::new(th.highlight_theme());
         // Re-apply Zed fonts — Theme::change resets families from its config.
         crate::assets::sync_component_fonts(cx);
+        // Keep all open terminal tabs in sync with the new theme colors.
+        let palette = &th.terminal_palette;
+        for tab in &self.terminal_tabs {
+            tab.update(cx, |term, cx| {
+                term.set_theme(palette, cx);
+            });
+        }
         self.status = format!("Theme: {}", th.name);
         cx.notify();
     }
@@ -603,7 +610,8 @@ impl Workspace {
             };
             format!("{base} {id}")
         };
-        let term = cx.new(|cx| crate::terminal::Terminal::new(root.as_deref(), label, window, cx));
+        let palette = self.theme().terminal_palette.clone();
+        let term = cx.new(|cx| crate::terminal::Terminal::new(root.as_deref(), label, palette, window, cx));
         self.terminal_tabs.push(term);
         self.active_terminal = self.terminal_tabs.len() - 1;
         self.show_terminal = true;
@@ -1891,6 +1899,12 @@ impl Workspace {
         let themes = theme::all();
         if let Some(pos) = themes.iter().position(|t| t.name == self.settings.workbench_color_theme) {
             self.theme_ix = pos;
+            let palette = &themes[pos].terminal_palette;
+            for tab in &self.terminal_tabs {
+                tab.update(cx, |term, cx| {
+                    term.set_theme(palette, cx);
+                });
+            }
         }
         self.font_size = self.settings.editor_font_size;
         gpui_component::Theme::global_mut(cx).mono_font_size = gpui::px(self.font_size);
