@@ -195,7 +195,7 @@ pub(crate) fn render_tree(
                     inserted_inline = true;
                 }
             }
-            list = list.child(tree_row(node, depth, open, selected_path, t, cx));
+            list = list.child(tree_row(idx, node, depth, open, selected_path, t, cx));
         }
 
         if let Some((_, inline_depth)) = inline_pos {
@@ -297,6 +297,7 @@ fn inline_create_row(
 }
 
 fn tree_row(
+    idx: usize,
     node: &TreeNode,
     depth: usize,
     open: Option<&PathBuf>,
@@ -312,8 +313,11 @@ fn tree_row(
     let name = node.name.clone();
     let pad = BASE_PAD + depth as f32 * INDENT_STEP;
 
+    // Stable, allocation-free element id derived from the row's position in
+    // the flattened tree (the previous `format!("t{}", path.display())`
+    // allocated a SharedString per row on every frame).
     let mut row = div()
-        .id(SharedString::from(format!("t{}", path.display())))
+        .id(("tree-row", idx))
         .w_full()
         .h(px(ROW_HEIGHT))
         .relative()

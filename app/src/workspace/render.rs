@@ -9,7 +9,6 @@ use gpui_component::input::Input;
 
 use crate::actions::*;
 use crate::assets::SANS_FONT;
-use crate::fs_tree::display_name;
 use crate::theme::Colors;
 use crate::ui;
 use crate::workspace::CreatingKind;
@@ -33,27 +32,12 @@ impl Render for Workspace {
         let t = th.colors;
         let welcome = self.welcome_visible();
         let title = self.title();
-        let tree = &self.tree;
-        // Get the currently open file from active tab
-        let open = self.active_path().cloned();
-        let selected_path = self.selected_path.clone();
-        let explorer_section_expanded = self.explorer_section_expanded;
-        let inline_creating = self.inline_creating.clone();
-        let status = self.status.clone();
-        let activity = self.activity;
-        let root_opt = self.root.clone();
-        let show_sidebar = self.show_sidebar;
-        let show_terminal = self.show_terminal;
-        let theme_ix = self.theme_ix;
-        let theme_name = th.name.clone();
-        let font_size = self.font_size;
-        let terminal_tabs = self.terminal_tabs.clone();
-        let active_terminal = self.active_terminal;
 
         // Clamp panel sizes against the current viewport so shrinking or
         // maximizing the window never leaves a panel overflowing — and so
         // the panels keep their absolute pixel size on window resize
-        // (VS Code behavior) instead of scaling proportionally.
+        // (VS Code behavior) instead of scaling proportionally. (Must happen
+        // before the field borrows below, since both mutate `self`.)
         let max_sidebar = f32::from(window.viewport_size().width - px(320.0)).max(220.0);
         self.sidebar_width = self.sidebar_width.clamp(170.0, max_sidebar);
         let sidebar_w = self.sidebar_width;
@@ -62,12 +46,32 @@ impl Render for Workspace {
         self.terminal_height = self.terminal_height.clamp(80.0, max_terminal);
         let terminal_h = self.terminal_height;
         let panel_resize = self.panel_resize;
-        
+
+        // Borrowed views of state — the render helpers below only read these,
+        // so the per-frame deep clones (tabs, terminal_tabs, paths, strings,
+        // ...) are unnecessary and have been removed.
+        let tree = &self.tree;
+        // Get the currently open file from active tab
+        let open = self.active_path();
+        let selected_path = self.selected_path.as_ref();
+        let explorer_section_expanded = self.explorer_section_expanded;
+        let inline_creating = self.inline_creating.as_ref();
+        let status = self.status.as_str();
+        let activity = self.activity;
+        let root_opt = self.root.as_ref();
+        let show_sidebar = self.show_sidebar;
+        let show_terminal = self.show_terminal;
+        let theme_ix = self.theme_ix;
+        let theme_name = th.name.as_str();
+        let font_size = self.font_size;
+        let terminal_tabs = &self.terminal_tabs;
+        let active_terminal = self.active_terminal;
+
         // Tab-related data
-        let tabs = self.tabs.clone();
+        let tabs = &self.tabs;
         let active_tab = self.active_tab;
         // Get the active editor from the current tab
-        let editor = self.active_editor().cloned();
+        let editor = self.active_editor();
 
         div()
             .size_full()
@@ -211,15 +215,15 @@ impl Render for Workspace {
                                 .h_full()
                                 .overflow_hidden()
                                 .child(match activity {
-                                    Activity::Explorer => match &root_opt {
+                                    Activity::Explorer => match root_opt {
                                         Some(root) => ui::sidebar::explorer::render_tree(
                                             tree,
                                             Some(root.as_path()),
-                                            open.as_ref(),
-                                            selected_path.as_ref(),
+                                            open,
+                                            selected_path,
                                             explorer_section_expanded,
-                                            inline_creating.as_ref(),
-                                            &display_name(root),
+                                            inline_creating,
+                                            self.root_display.as_str(),
                                             &t,
                                             cx,
                                         ),
@@ -253,7 +257,7 @@ impl Render for Workspace {
                                     .bg(rgba(t.editor_bg))
                                     // Tab bar - only show when tabs exist
                                     .when(!tabs.is_empty(), |d| {
-                                        d.child(ui::tab_bar::render_tab_bar(&tabs, active_tab, &t, cx))
+                                        d.child(ui::tab_bar::render_tab_bar(tabs, active_tab, &t, cx))
                                     })
                                     // Editor area
                                     .when(welcome, |d| d.child(ui::welcome::render_welcome(&t, cx)))
@@ -267,7 +271,7 @@ impl Render for Workspace {
                                                     .font_family(crate::assets::MONO_FONT)
                                                     .text_size(px(font_size))
                                                     .child(
-                                                        Input::new(&editor)
+                                                        Input::new(editor)
                                                             .text_size(px(font_size))
                                                             .h_full()
                                                             .appearance(false)
@@ -287,7 +291,7 @@ impl Render for Workspace {
                                             .flex_shrink_0()
                                             .overflow_hidden()
                                             .child(crate::terminal::render_terminal_panel(
-                                                &terminal_tabs,
+                                                terminal_tabs,
                                                 active_terminal,
                                                 &t,
                                                 cx,
@@ -296,7 +300,7 @@ impl Render for Workspace {
                             }),
                     ),
             )
-            .child(ui::status_bar::render_status_bar(&status, &theme_name, &t))
+            .child(ui::status_bar::render_status_bar(status, theme_name, &t))
             // While a panel divider is being dragged, capture ALL mouse
             // movement with a transparent full-window overlay. Without this
             // the drag would freeze as soon as the cursor leaves the thin
