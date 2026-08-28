@@ -129,6 +129,7 @@ name = "app"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal 0.24.2",
+ "anyhow",
  "async-channel 2.5.0",
  "gpui",
  "gpui-component",

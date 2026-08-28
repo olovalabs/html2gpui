@@ -4,24 +4,47 @@
 //! `typescript-language-server`, `rust-analyzer`, `gopls`, `pyright`) over
 //! stdio using JSON-RPC and `lsp-types`. Diagnostics are streamed to the
 //! workspace and rendered as real-time squiggly underlines.
+//!
+//! Besides the streaming notifications, the client supports synchronous
+//! request/response pairs (`textDocument/completion`, `textDocument/hover`,
+//! `textDocument/definition`, `textDocument/codeAction`,
+//! `textDocument/formatting`, …) which are exposed to the editor through the
+//! provider hooks of gpui-component's `InputState::lsp` — the same surface
+//! Zed's editor uses to talk to language servers.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
+use std::ops::Range as StdRange;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::rc::Rc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use gpui::{App, Context, Entity, SharedString, Task, Window};
+use gpui_component::input::{
+    CodeActionProvider, CompletionProvider, DefinitionProvider, HoverProvider, InputState, Rope,
+    RopeExt,
+};
 use lsp_types::{
-    ClientCapabilities, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, InitializeParams, InitializedParams, PublishDiagnosticsParams,
-    PublishDiagnosticsClientCapabilities, TextDocumentClientCapabilities,
-    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentSyncClientCapabilities, Uri, VersionedTextDocumentIdentifier,
+    ClientCapabilities, CodeAction, CodeActionContext, CodeActionOrCommand, CodeActionParams,
+    CodeActionResponse, CodeActionTriggerKind, CompletionContext, CompletionParams,
+    CompletionResponse, CompletionTriggerKind, DidChangeTextDocumentParams,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentFormattingParams,
+    FormattingOptions, GotoDefinitionResponse, Hover, InitializeParams, InitializedParams,
+    Location, LocationLink, PublishDiagnosticsClientCapabilities, PublishDiagnosticsParams,
+    TextDocumentClientCapabilities, TextDocumentContentChangeEvent, TextDocumentIdentifier,
+    TextDocumentItem, TextDocumentPositionParams, TextDocumentSyncClientCapabilities, Uri,
+    VersionedTextDocumentIdentifier,
 };
 use serde_json::{json, Value};
+
+/// How long a request may take before we give up (servers that are
+/// initializing a large project can be slow on the first request).
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Clone, Debug)]
 pub enum LspEvent {
@@ -74,6 +97,14 @@ impl LspManager {
         Some(client)
     }
 
+    /// The running client for `lang`, if any (no spawning).
+    pub fn client_for(&self, lang: &str) -> Option<Arc<LspClient>> {
+        self.clients
+            .get(lang)
+            .cloned()
+            .filter(|c| c.is_alive())
+    }
+
     pub fn open_document(&mut self, path: &Path, lang: &str, text: &str, root: Option<&Path>) {
         if let Some(client) = self.ensure_server(lang, root) {
             client.did_open(path, lang, text);
@@ -118,6 +149,20 @@ pub struct LspClient {
     /// `didChange` messages, coalescing a fast typist's keystrokes into a
     /// single sync instead of one whole-document message per keystroke.
     pending_changes: Arc<Mutex<HashMap<PathBuf, String>>>,
+    /// The most recent text we told the server for each open document. Used
+    /// by providers to answer requests that need positions (code actions).
+    last_texts: Arc<Mutex<HashMap<PathBuf, String>>>,
+    /// Latest diagnostics per document (from publishDiagnostics), used to
+    /// build the `CodeActionContext` of code-action requests.
+    last_diagnostics: Arc<Mutex<HashMap<PathBuf, Vec<lsp_types::Diagnostic>>>>,
+    /// Capabilities advertised by the server in its `initialize` response.
+    server_capabilities: Arc<Mutex<Option<lsp_types::ServerCapabilities>>>,
+    /// Monotonic request id allocator. Starts at 100 so the reserved
+    /// `initialize` id (1) never collides with a routed response.
+    next_id: AtomicI64,
+    /// In-flight requests: id → channel that the reader thread delivers the
+    /// response on.
+    pending: Arc<Mutex<HashMap<i64, mpsc::Sender<Value>>>>,
     child: Arc<Mutex<Option<Child>>>,
 }
 
@@ -151,6 +196,9 @@ impl LspClient {
             "bash-language-server" => {
                 cmd.arg("start");
             }
+            "vscode-html-language-server" | "vscode-css-language-server" => {
+                cmd.arg("--stdio");
+            }
             _ => {}
         }
 
@@ -180,6 +228,14 @@ impl LspClient {
         let versions = Arc::new(Mutex::new(HashMap::new()));
         let pending_changes: Arc<Mutex<HashMap<PathBuf, String>>> =
             Arc::new(Mutex::new(HashMap::new()));
+        let last_texts: Arc<Mutex<HashMap<PathBuf, String>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let last_diagnostics: Arc<Mutex<HashMap<PathBuf, Vec<lsp_types::Diagnostic>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let server_capabilities: Arc<Mutex<Option<lsp_types::ServerCapabilities>>> =
+            Arc::new(Mutex::new(None));
+        let pending: Arc<Mutex<HashMap<i64, mpsc::Sender<Value>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         let child_arc = Arc::new(Mutex::new(Some(child)));
 
         // Framed-message channel drained by a dedicated writer thread. All
@@ -195,6 +251,11 @@ impl LspClient {
             is_initialized: is_initialized.clone(),
             pending_opens: pending_opens.clone(),
             pending_changes: pending_changes.clone(),
+            last_texts: last_texts.clone(),
+            last_diagnostics: last_diagnostics.clone(),
+            server_capabilities: server_capabilities.clone(),
+            next_id: AtomicI64::new(100),
+            pending: pending.clone(),
             child: child_arc,
         };
 
@@ -234,52 +295,100 @@ impl LspClient {
         let out_for_init = out_tx.clone();
         let pending_for_init = pending_opens.clone();
         let versions_for_init = versions.clone();
+        let last_texts_r = last_texts.clone();
+        let last_diag_r = last_diagnostics.clone();
+        let caps_r = server_capabilities.clone();
+        let pending_r = pending.clone();
 
         thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
             while *is_alive_clone.lock().unwrap() {
                 match read_message(&mut reader) {
                     Ok(Some(mut msg)) => {
-                        // Check if this is the initialize response (id: 1)
-                        if msg.get("id").and_then(Value::as_i64) == Some(1) {
-                            *is_init_clone.lock().unwrap() = true;
+                        let id = msg.get("id").and_then(Value::as_i64);
+                        let method = msg
+                            .get("method")
+                            .and_then(Value::as_str)
+                            .map(str::to_string);
 
-                            // Send initialized notification
-                            let initialized = json!({
-                                "jsonrpc": "2.0",
-                                "method": "initialized",
-                                "params": InitializedParams {}
-                            });
-                            send_framed(&out_for_init, &initialized);
-
-                            // Drain and send all pending did_open documents
-                            let pendings: Vec<_> = {
-                                let mut guard = pending_for_init.lock().unwrap();
-                                guard.drain(..).collect()
-                            };
-
-                            for (path, lang, text) in pendings {
-                                if let Some(uri) = path_to_uri(&path) {
-                                    versions_for_init.lock().unwrap().insert(path, 1);
-                                    let params = DidOpenTextDocumentParams {
-                                        text_document: TextDocumentItem {
-                                            uri,
-                                            language_id: lang,
-                                            version: 1,
-                                            text,
-                                        },
-                                    };
-                                    let open_msg = json!({
-                                        "jsonrpc": "2.0",
-                                        "method": "textDocument/didOpen",
-                                        "params": params
+                        match (id, method.as_deref()) {
+                            // The `initialize` response (id 1, no method).
+                            (Some(1), None) => {
+                                // Remember what this server can do so providers
+                                // can skip unsupported features.
+                                *caps_r.lock().unwrap() = msg
+                                    .get("result")
+                                    .and_then(|r| r.get("capabilities"))
+                                    .and_then(|c| {
+                                        serde_json::from_value::<
+                                            lsp_types::ServerCapabilities,
+                                        >(c.clone())
+                                        .ok()
                                     });
-                                    send_framed(&out_for_init, &open_msg);
+
+                                *is_init_clone.lock().unwrap() = true;
+
+                                // Send initialized notification
+                                let initialized = json!({
+                                    "jsonrpc": "2.0",
+                                    "method": "initialized",
+                                    "params": InitializedParams {}
+                                });
+                                send_framed(&out_for_init, &initialized);
+
+                                // Drain and send all pending did_open documents
+                                let pendings: Vec<_> = {
+                                    let mut guard = pending_for_init.lock().unwrap();
+                                    guard.drain(..).collect()
+                                };
+
+                                for (path, lang, text) in pendings {
+                                    if let Some(uri) = path_to_uri(&path) {
+                                        versions_for_init.lock().unwrap().insert(path.clone(), 1);
+                                        last_texts_r.lock().unwrap().insert(path, text.clone());
+                                        let params = DidOpenTextDocumentParams {
+                                            text_document: TextDocumentItem {
+                                                uri,
+                                                language_id: lang,
+                                                version: 1,
+                                                text,
+                                            },
+                                        };
+                                        let open_msg = json!({
+                                            "jsonrpc": "2.0",
+                                            "method": "textDocument/didOpen",
+                                            "params": params
+                                        });
+                                        send_framed(&out_for_init, &open_msg);
+                                    }
                                 }
                             }
+                            // A response to one of our requests.
+                            (Some(req_id), None) => {
+                                if let Some(tx) = pending_r.lock().unwrap().remove(&req_id) {
+                                    let _ = tx.send(msg);
+                                }
+                            }
+                            // A server-initiated request: we don't implement
+                            // any, so answer method-not-found so servers
+                            // don't wait forever.
+                            (Some(req_id), Some(_)) => {
+                                let err = json!({
+                                    "jsonrpc": "2.0",
+                                    "id": req_id,
+                                    "error": {
+                                        "code": -32601,
+                                        "message": "method not found"
+                                    }
+                                });
+                                send_framed(&out_for_init, &err);
+                            }
+                            // A notification from the server.
+                            (None, Some(_)) => {
+                                handle_incoming_message(&mut msg, &event_tx, &last_diag_r);
+                            }
+                            (None, None) => {}
                         }
-
-                        handle_incoming_message(&mut msg, &event_tx);
                     }
                     Ok(None) => {
                         break;
@@ -298,6 +407,28 @@ impl LspClient {
 
     pub fn is_alive(&self) -> bool {
         *self.is_alive.lock().unwrap()
+    }
+
+    /// True once the initialize handshake finished and the process is alive.
+    fn is_ready(&self) -> bool {
+        *self.is_initialized.lock().unwrap() && *self.is_alive.lock().unwrap()
+    }
+
+    /// The capabilities the server advertised in its initialize response.
+    pub fn capabilities(&self) -> Option<lsp_types::ServerCapabilities> {
+        self.server_capabilities.lock().unwrap().clone()
+    }
+
+    /// True when the server advertised a capability (or hasn't told us yet —
+    /// requests are still safe because they no-op until initialized).
+    pub fn supports(&self, pred: impl FnOnce(&lsp_types::ServerCapabilities) -> bool) -> bool {
+        self.capabilities().map(pred).unwrap_or(true)
+    }
+
+    /// The most recent text synced for `path`, used to answer requests that
+    /// need line/character positions.
+    pub fn last_text(&self, path: &Path) -> Option<String> {
+        self.last_texts.lock().unwrap().get(path).cloned()
     }
 
     #[allow(deprecated)]
@@ -319,6 +450,41 @@ impl LspClient {
                     will_save: Some(false),
                     will_save_wait_until: Some(false),
                     did_save: Some(true),
+                }),
+                completion: Some(lsp_types::CompletionClientCapabilities {
+                    completion_item: Some(lsp_types::CompletionItemCapability {
+                        snippet_support: Some(true),
+                        documentation_format: Some(vec![lsp_types::MarkupKind::Markdown]),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                hover: Some(lsp_types::HoverClientCapabilities {
+                    content_format: Some(vec![lsp_types::MarkupKind::Markdown]),
+                    ..Default::default()
+                }),
+                definition: Some(lsp_types::GotoDefinitionCapability {
+                    dynamic_registration: Some(true),
+                    link_support: Some(true),
+                }),
+                code_action: Some(lsp_types::CodeActionClientCapabilities {
+                    code_action_literal_support: Some(lsp_types::CodeActionLiteralSupport {
+                        code_action_kind: lsp_types::CodeActionKindLiteralSupport {
+                            value_set: vec![
+                                lsp_types::CodeActionKind::QUICKFIX,
+                                lsp_types::CodeActionKind::REFACTOR,
+                                lsp_types::CodeActionKind::REFACTOR_EXTRACT,
+                                lsp_types::CodeActionKind::REFACTOR_INLINE,
+                                lsp_types::CodeActionKind::REFACTOR_REWRITE,
+                                lsp_types::CodeActionKind::SOURCE,
+                                lsp_types::CodeActionKind::SOURCE_ORGANIZE_IMPORTS,
+                            ],
+                        },
+                    }),
+                    ..Default::default()
+                }),
+                formatting: Some(lsp_types::DocumentFormattingClientCapabilities {
+                    dynamic_registration: Some(true),
                 }),
                 ..Default::default()
             }),
@@ -350,6 +516,11 @@ impl LspClient {
     }
 
     pub fn did_open(&self, path: &Path, lang: &str, text: &str) {
+        self.last_texts
+            .lock()
+            .unwrap()
+            .insert(path.to_path_buf(), text.to_string());
+
         if !*self.is_initialized.lock().unwrap() {
             // Queue until initialize handshake completes
             self.pending_opens
@@ -386,6 +557,10 @@ impl LspClient {
         if !*self.is_initialized.lock().unwrap() {
             return;
         }
+        self.last_texts
+            .lock()
+            .unwrap()
+            .insert(path.to_path_buf(), text.to_string());
 
         // Coalesce: remember only the latest text per document. The writer
         // thread flushes pending changes as debounced full-document syncs,
@@ -402,6 +577,8 @@ impl LspClient {
             return;
         };
         self.versions.lock().unwrap().remove(path);
+        self.last_texts.lock().unwrap().remove(path);
+        self.last_diagnostics.lock().unwrap().remove(path);
         // Drop any not-yet-flushed edit for the document so a coalesced
         // didChange can never race the didClose.
         self.pending_changes.lock().unwrap().remove(path);
@@ -419,8 +596,461 @@ impl LspClient {
         self.send_payload(&msg);
     }
 
+    /// Immediately sync `text` as the authoritative full document, dropping
+    /// any not-yet-flushed coalesced edit. Call before a request so the
+    /// server's copy matches what the user sees.
+    pub fn sync_document(&self, path: &Path, text: &str) {
+        if !self.is_ready() {
+            return;
+        }
+        let Some(uri) = path_to_uri(path) else {
+            return;
+        };
+        self.pending_changes.lock().unwrap().remove(path);
+        self.last_texts
+            .lock()
+            .unwrap()
+            .insert(path.to_path_buf(), text.to_string());
+
+        let version = {
+            let mut versions_guard = self.versions.lock().unwrap();
+            let v = versions_guard.entry(path.to_path_buf()).or_insert(0);
+            *v += 1;
+            *v
+        };
+        let params = DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier { uri, version },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: text.to_string(),
+            }],
+        };
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": params
+        });
+        self.send_payload(&msg);
+    }
+
+    /// Send a JSON-RPC request and block (up to `timeout`) for its response.
+    /// Returns the `result` field, or `None` on timeout / server error /
+    /// disconnect. Safe to call from background threads; never call from the
+    /// UI thread.
+    pub fn request(&self, method: &str, params: Value, timeout: Duration) -> Option<Value> {
+        if !self.is_ready() {
+            return None;
+        }
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = mpsc::channel::<Value>();
+        self.pending.lock().unwrap().insert(id, tx);
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params
+        });
+        self.send_payload(&msg);
+        match rx.recv_timeout(timeout) {
+            Ok(resp) => resp.get("result").cloned(),
+            Err(_) => {
+                self.pending.lock().unwrap().remove(&id);
+                None
+            }
+        }
+    }
+
+    /// [`Self::sync_document`] followed by [`Self::request`] with the
+    /// default timeout. The server's answer is guaranteed to be computed
+    /// against exactly `text`.
+    pub fn request_with_text(
+        &self,
+        path: &Path,
+        text: &str,
+        method: &str,
+        params: Value,
+    ) -> Option<Value> {
+        self.sync_document(path, text);
+        self.request(method, params, REQUEST_TIMEOUT)
+    }
+
+    /// `textDocument/formatting` for the whole document.
+    pub fn format_document(&self, path: &Path, text: &str) -> Option<Vec<lsp_types::TextEdit>> {
+        if !self.supports(|c| c.document_formatting_provider.is_some()) {
+            return None;
+        }
+        let uri = path_to_uri(path)?;
+        let params = DocumentFormattingParams {
+            text_document: TextDocumentIdentifier::new(uri),
+            options: FormattingOptions {
+                tab_size: 4,
+                insert_spaces: true,
+                properties: Default::default(),
+                trim_trailing_whitespace: None,
+                insert_final_newline: None,
+                trim_final_newlines: None,
+            },
+            work_done_progress_params: Default::default(),
+        };
+        let params = serde_json::to_value(params).ok()?;
+        let response = self.request_with_text(path, text, "textDocument/formatting", params)?;
+        serde_json::from_value::<Vec<lsp_types::TextEdit>>(response).ok()
+    }
+
     fn send_payload(&self, val: &Value) {
         send_framed(&self.out, val);
+    }
+}
+
+impl Drop for LspClient {
+    fn drop(&mut self) {
+        // Best-effort graceful shutdown: the writer thread may flush these
+        // before the child is killed.
+        *self.is_alive.lock().unwrap() = false;
+        let shutdown = json!({"jsonrpc": "2.0", "id": 999_999, "method": "shutdown", "params": null});
+        if let Some(bytes) = frame_payload(&shutdown) {
+            let _ = self.out.send(bytes);
+        }
+        let exit = json!({"jsonrpc": "2.0", "method": "exit"});
+        if let Some(bytes) = frame_payload(&exit) {
+            let _ = self.out.send(bytes);
+        }
+        if let Some(mut child) = self.child.lock().unwrap().take() {
+            let _ = child.kill();
+        }
+    }
+}
+
+/// Attach the standard LSP provider set (completions, hover, go-to-definition,
+/// code actions) to an editor. Call once per editor after its server is
+/// ensured; the providers talk to `client` and identify documents by `path`.
+pub fn attach_lsp_providers(state: &mut InputState, client: Arc<LspClient>, path: PathBuf) {
+    state.lsp.completion_provider = Some(Rc::new(LspCompletionProvider {
+        client: client.clone(),
+        path: path.clone(),
+    }));
+    state.lsp.hover_provider = Some(Rc::new(LspHoverProvider {
+        client: client.clone(),
+        path: path.clone(),
+    }));
+    state.lsp.definition_provider = Some(Rc::new(LspDefinitionProvider {
+        client: client.clone(),
+        path: path.clone(),
+    }));
+    state.lsp.code_action_providers = vec![Rc::new(LspCodeActionProvider { client, path })];
+}
+
+/// Characters that fire a completion request while typing. Mirrors the
+/// trigger set of VS Code / Zed: word characters plus common punctuation
+/// that usually starts a member access or argument list.
+pub fn is_completion_trigger_char(c: char) -> bool {
+    c.is_alphanumeric()
+        || matches!(
+            c,
+            '_' | '.' | '$' | ':' | '/' | '<' | '"' | '#' | '@' | '-' | '>' | '(' | '[' | '{'
+        )
+}
+
+// -- Providers --------------------------------------------------------------
+
+/// `textDocument/completion` + inline (ghost text) completions.
+pub struct LspCompletionProvider {
+    client: Arc<LspClient>,
+    path: PathBuf,
+}
+
+impl CompletionProvider for LspCompletionProvider {
+    fn completions(
+        &self,
+        text: &Rope,
+        offset: usize,
+        trigger: CompletionContext,
+        _window: &mut Window,
+        cx: &mut Context<InputState>,
+    ) -> Task<anyhow::Result<CompletionResponse>> {
+        if !self.client.supports(|c| c.completion_provider.is_some()) {
+            return Task::ready(Ok(CompletionResponse::Array(vec![])));
+        }
+        let client = self.client.clone();
+        let path = self.path.clone();
+        let text_str = text.to_string();
+        let position = text.offset_to_position(offset);
+
+        // The library hands us the whole query text typed since the menu
+        // opened; the protocol wants a single trigger character, so only
+        // forward it when it is exactly one char.
+        let trigger_character = trigger.trigger_character.filter(|c| c.chars().count() == 1);
+        let trigger_kind = if trigger_character.is_some() {
+            trigger.trigger_kind
+        } else {
+            CompletionTriggerKind::INVOKED
+        };
+
+        cx.background_spawn(async move {
+            let Some(uri) = path_to_uri(&path) else {
+                return Ok(CompletionResponse::Array(vec![]));
+            };
+            let params = CompletionParams {
+                text_document_position: TextDocumentPositionParams::new(
+                    TextDocumentIdentifier::new(uri),
+                    position,
+                ),
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+                context: Some(CompletionContext {
+                    trigger_kind,
+                    trigger_character,
+                }),
+            };
+            let Ok(params) = serde_json::to_value(params) else {
+                return Ok(CompletionResponse::Array(vec![]));
+            };
+            let response =
+                client.request_with_text(&path, &text_str, "textDocument/completion", params);
+            Ok(response
+                .and_then(|v| serde_json::from_value::<CompletionResponse>(v).ok())
+                .unwrap_or(CompletionResponse::Array(vec![])))
+        })
+    }
+
+    fn is_completion_trigger(
+        &self,
+        _offset: usize,
+        new_text: &str,
+        _cx: &mut Context<InputState>,
+    ) -> bool {
+        new_text.chars().next().map(is_completion_trigger_char).unwrap_or(false)
+    }
+}
+
+/// `textDocument/hover` — the library shows the result in a popover.
+pub struct LspHoverProvider {
+    client: Arc<LspClient>,
+    path: PathBuf,
+}
+
+impl HoverProvider for LspHoverProvider {
+    fn hover(
+        &self,
+        text: &Rope,
+        offset: usize,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Option<Hover>>> {
+        if !self.client.supports(|c| c.hover_provider.is_some()) {
+            return Task::ready(Ok(None));
+        }
+        let client = self.client.clone();
+        let path = self.path.clone();
+        let text_str = text.to_string();
+        let position = text.offset_to_position(offset);
+
+        cx.background_spawn(async move {
+            let Some(uri) = path_to_uri(&path) else {
+                return Ok(None);
+            };
+            let params = TextDocumentPositionParams::new(TextDocumentIdentifier::new(uri), position);
+            let Ok(params) = serde_json::to_value(params) else {
+                return Ok(None);
+            };
+            let response = client.request_with_text(&path, &text_str, "textDocument/hover", params);
+            Ok(response
+                .and_then(|v| serde_json::from_value::<Option<Hover>>(v).ok())
+                .flatten())
+        })
+    }
+}
+
+/// `textDocument/definition` — ctrl-hover underlines the symbol and F12
+/// jumps (the library renders the link highlight and handles the jump).
+pub struct LspDefinitionProvider {
+    client: Arc<LspClient>,
+    path: PathBuf,
+}
+
+impl DefinitionProvider for LspDefinitionProvider {
+    fn definitions(
+        &self,
+        text: &Rope,
+        offset: usize,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Vec<LocationLink>>> {
+        if !self.client.supports(|c| c.definition_provider.is_some()) {
+            return Task::ready(Ok(vec![]));
+        }
+        let client = self.client.clone();
+        let path = self.path.clone();
+        let text_str = text.to_string();
+        let position = text.offset_to_position(offset);
+
+        cx.background_spawn(async move {
+            let Some(uri) = path_to_uri(&path) else {
+                return Ok(vec![]);
+            };
+            let params = TextDocumentPositionParams::new(TextDocumentIdentifier::new(uri), position);
+            let Ok(params) = serde_json::to_value(params) else {
+                return Ok(vec![]);
+            };
+            let response = client.request_with_text(&path, &text_str, "textDocument/definition", params);
+            let locations = response
+                .and_then(|v| serde_json::from_value::<GotoDefinitionResponse>(v).ok())
+                .map(|r| match r {
+                    GotoDefinitionResponse::Scalar(loc) => vec![location_to_link(loc)],
+                    GotoDefinitionResponse::Array(locs) => {
+                        locs.into_iter().map(location_to_link).collect()
+                    }
+                    GotoDefinitionResponse::Link(links) => links,
+                })
+                .unwrap_or_default();
+            Ok(locations)
+        })
+    }
+}
+
+/// `textDocument/codeAction` + `workspace/executeCommand`.
+pub struct LspCodeActionProvider {
+    client: Arc<LspClient>,
+    path: PathBuf,
+}
+
+impl CodeActionProvider for LspCodeActionProvider {
+    fn id(&self) -> SharedString {
+        "LSP".into()
+    }
+
+    fn code_actions(
+        &self,
+        _state: Entity<InputState>,
+        range: StdRange<usize>,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Vec<CodeAction>>> {
+        if !self.client.supports(|c| c.code_action_provider.is_some()) {
+            return Task::ready(Ok(vec![]));
+        }
+        let client = self.client.clone();
+        let path = self.path.clone();
+
+        cx.background_spawn(async move {
+            // The byte range refers to the text we last synced; rebuild the
+            // rope so we can convert it to line/character positions.
+            let Some(text) = client.last_text(&path) else {
+                return Ok(vec![]);
+            };
+            let rope = Rope::from_str(&text);
+            let start = rope.offset_to_position(range.start);
+            let end = rope.offset_to_position(range.end);
+
+            let Some(uri) = path_to_uri(&path) else {
+                return Ok(vec![]);
+            };
+            let Some(params) = serde_json::to_value(CodeActionParams {
+                text_document: TextDocumentIdentifier::new(uri),
+                range: lsp_types::Range::new(start, end),
+                context: CodeActionContext {
+                    diagnostics: client
+                        .last_diagnostics
+                        .lock()
+                        .unwrap()
+                        .get(&path)
+                        .cloned()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|d| {
+                            // Keep only diagnostics overlapping the range.
+                            !(d.range.end <= start || d.range.start >= end)
+                        })
+                        .collect(),
+                    only: None,
+                    trigger_kind: Some(CodeActionTriggerKind::INVOKED),
+                },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            })
+            .ok()
+            else {
+                return Ok(vec![]);
+            };
+
+            let response =
+                client.request_with_text(&path, &text, "textDocument/codeAction", params);
+            let actions = response
+                .and_then(|v| serde_json::from_value::<CodeActionResponse>(v).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|item| match item {
+                    CodeActionOrCommand::CodeAction(action) => action,
+                    CodeActionOrCommand::Command(command) => CodeAction {
+                        title: command.title.clone(),
+                        kind: None,
+                        diagnostics: None,
+                        edit: None,
+                        command: Some(command),
+                        data: None,
+                        disabled: None,
+                    },
+                })
+                .collect();
+            Ok(actions)
+        })
+    }
+
+    fn perform_code_action(
+        &self,
+        state: Entity<InputState>,
+        action: CodeAction,
+        _push_to_history: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<()>> {
+        let client = self.client.clone();
+        let path = self.path.clone();
+
+        // Apply the action's workspace edits to the current document (the
+        // library only has one document per editor; multi-file edits like
+        // renames touch the other files on the next open).
+        if let Some(edit) = action.edit {
+            if let (Some(uri), Some(changes)) = (path_to_uri(&path), edit.changes) {
+                if let Some((_, text_edits)) =
+                    changes.iter().find(|(u, _)| u.as_str() == uri.as_str())
+                {
+                    let text_edits = text_edits.clone();
+                    let state = state.downgrade();
+                    let _ = window.spawn(cx, async move |cx| {
+                        if let Some(state) = state.upgrade() {
+                            state.update_in(cx, |state, window, cx| {
+                                state.apply_lsp_edits(&text_edits, window, cx);
+                            })?;
+                        }
+                        Ok(())
+                    });
+                }
+            }
+        }
+
+        // Execute the action's command on the server.
+        if let Some(command) = action.command {
+            let command_name = command.command;
+            let arguments = command.arguments.unwrap_or_default();
+            return cx.background_spawn(async move {
+                let params = json!({ "command": command_name, "arguments": arguments });
+                let _ = client.request("workspace/executeCommand", params, REQUEST_TIMEOUT);
+                Ok(())
+            });
+        }
+
+        Task::ready(Ok(()))
+    }
+}
+
+fn location_to_link(loc: Location) -> LocationLink {
+    LocationLink {
+        target_uri: loc.uri,
+        target_range: loc.range,
+        target_selection_range: loc.range,
+        origin_selection_range: None,
     }
 }
 
@@ -469,7 +1099,6 @@ fn flush_pending_changes(
     }
     for (path, text) in items {
         // The document was closed before the flush — drop the stale edit.
-        // (Bind the check so the guard is dropped before the lock below.)
         let doc_open = versions.lock().unwrap().contains_key(&path);
         if !doc_open {
             continue;
@@ -498,15 +1127,6 @@ fn flush_pending_changes(
         });
         if let Some(bytes) = frame_payload(&msg) {
             write_to_stdin(stdin_arc, &bytes);
-        }
-    }
-}
-
-impl Drop for LspClient {
-    fn drop(&mut self) {
-        *self.is_alive.lock().unwrap() = false;
-        if let Some(mut child) = self.child.lock().unwrap().take() {
-            let _ = child.kill();
         }
     }
 }
@@ -610,7 +1230,11 @@ fn read_message<R: BufRead>(reader: &mut R) -> std::io::Result<Option<Value>> {
     Ok(val)
 }
 
-fn handle_incoming_message(msg: &mut Value, event_tx: &async_channel::Sender<LspEvent>) {
+fn handle_incoming_message(
+    msg: &mut Value,
+    event_tx: &async_channel::Sender<LspEvent>,
+    last_diag: &Mutex<HashMap<PathBuf, Vec<lsp_types::Diagnostic>>>,
+) {
     let Some(method) = msg.get("method").and_then(Value::as_str) else {
         return;
     };
@@ -623,6 +1247,10 @@ fn handle_incoming_message(msg: &mut Value, event_tx: &async_channel::Sender<Lsp
                 serde_json::from_value::<PublishDiagnosticsParams>(std::mem::take(params))
             {
                 if let Some(path) = uri_to_path(&pub_diag.uri) {
+                    last_diag
+                        .lock()
+                        .unwrap()
+                        .insert(path.clone(), pub_diag.diagnostics.clone());
                     for diag in &mut pub_diag.diagnostics {
                         let source_str = diag.source.as_deref().unwrap_or("typescript");
                         let code_str = match &diag.code {
@@ -665,6 +1293,15 @@ mod tests {
         let mut cursor = std::io::Cursor::new(framed.into_bytes());
         let msg = read_message(&mut cursor).expect("read ok").expect("some msg");
         assert_eq!(msg["method"], "test");
+    }
+
+    #[test]
+    fn test_trigger_chars() {
+        assert!(is_completion_trigger_char('a'));
+        assert!(is_completion_trigger_char('_'));
+        assert!(is_completion_trigger_char('.'));
+        assert!(!is_completion_trigger_char(' '));
+        assert!(!is_completion_trigger_char(';'));
     }
 
     #[test]
