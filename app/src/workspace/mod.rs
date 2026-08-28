@@ -99,6 +99,32 @@ pub(crate) struct Workspace {
     /// focus when no editor/terminal does, so global keybindings always have
     /// a dispatch path and shortcuts never go dead.
     pub(crate) focus_handle: FocusHandle,
+    /// Draggable sidebar width in pixels. Kept at an absolute pixel value
+    /// when the window resizes (VS Code behavior): the editor area absorbs
+    /// the change instead of the sidebar scaling with the window.
+    pub(crate) sidebar_width: f32,
+    /// Draggable terminal panel height in pixels (same behavior as above).
+    pub(crate) terminal_height: f32,
+    /// Active panel resize drag: which handle was grabbed, where the mouse
+    /// was at grab time and how big the panel was.
+    pub(crate) panel_resize: Option<PanelResizeDrag>,
+}
+
+/// Which divider is being dragged.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum ResizeKind {
+    Sidebar,
+    Terminal,
+}
+
+/// State of an in-progress panel resize drag.
+#[derive(Clone, Copy)]
+pub(crate) struct PanelResizeDrag {
+    pub(crate) kind: ResizeKind,
+    /// Mouse position along the drag axis at grab time.
+    pub(crate) start_mouse: f32,
+    /// Panel size at grab time.
+    pub(crate) start_size: f32,
 }
 
 impl Workspace {
@@ -179,6 +205,9 @@ impl Workspace {
             tabs: Vec::new(),
             active_tab: 0,
             focus_handle,
+            sidebar_width: 300.0,
+            terminal_height: 320.0,
+            panel_resize: None,
         }
     }
 

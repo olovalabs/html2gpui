@@ -2,17 +2,19 @@
 //! (+ terminal) → status bar into a single column, and wires every action to
 //! its [`Workspace`] command.
 
-use gpui::{div, prelude::*, px, rgba, Context, Render, Window};
+use gpui::{
+    div, prelude::*, px, rgba, Context, MouseButton, MouseMoveEvent, MouseUpEvent, Render, Window,
+};
 use gpui_component::input::Input;
-use gpui_component::resizable::{h_resizable, resizable_panel, v_resizable};
 
 use crate::actions::*;
 use crate::assets::SANS_FONT;
 use crate::fs_tree::display_name;
+use crate::theme::Colors;
 use crate::ui;
 use crate::workspace::CreatingKind;
 
-use super::{Activity, Workspace};
+use super::{Activity, PanelResizeDrag, ResizeKind, Workspace};
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -39,6 +41,17 @@ impl Render for Workspace {
         let theme_name = th.name.clone();
         let font_size = self.font_size;
         let terminal = self.terminal.clone();
+
+        // Clamp panel sizes against the current viewport so shrinking or
+        // maximizing the window never leaves a panel overflowing — and so
+        // the panels keep their absolute pixel size on window resize
+        // (VS Code behavior) instead of scaling proportionally.
+        let max_sidebar = f32::from(window.viewport_size().width - px(320.0)).max(220.0);
+        self.sidebar_width = self.sidebar_width.clamp(170.0, max_sidebar);
+        let sidebar_w = self.sidebar_width;
+        let max_terminal = f32::from(window.viewport_size().height - px(220.0)).max(120.0);
+        self.terminal_height = self.terminal_height.clamp(80.0, max_terminal);
+        let terminal_h = self.terminal_height;
         
         // Tab-related data
         let tabs = self.tabs.clone();
@@ -150,6 +163,40 @@ impl Render for Workspace {
             // title-bar dragging on Windows. The focus target lives on the
             // tiny `workspace-focus-catcher` element below instead.
             .key_context("Workspace")
+            // Panel resize drags (sidebar width / terminal height): the
+            // move/up listeners live on the root div so the drag keeps
+            // working when the cursor moves fast off the thin handle.
+            .on_mouse_move(cx.listener(
+                |this, ev: &MouseMoveEvent, window, cx| {
+                    let Some(rz) = this.panel_resize else {
+                        return;
+                    };
+                    match rz.kind {
+                        ResizeKind::Sidebar => {
+                            let max = f32::from(window.viewport_size().width - px(320.0)).max(220.0);
+                            this.sidebar_width =
+                                (rz.start_size + (f32::from(ev.position.x) - rz.start_mouse))
+                                    .clamp(170.0, max);
+                        }
+                        ResizeKind::Terminal => {
+                            let max =
+                                f32::from(window.viewport_size().height - px(220.0)).max(120.0);
+                            this.terminal_height =
+                                (rz.start_size - (f32::from(ev.position.y) - rz.start_mouse))
+                                    .clamp(80.0, max);
+                        }
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                },
+            ))
+            .on_mouse_up(MouseButton::Left, cx.listener(
+                |this, _: &MouseUpEvent, _, cx| {
+                    if this.panel_resize.take().is_some() {
+                        cx.notify();
+                    }
+                },
+            ))
             // Invisible 1x1 focus target: when no editor or terminal is
             // focused, the workspace holds focus here so global keybindings
             // always have a dispatch path (Zed keeps an equivalent workspace
@@ -175,111 +222,151 @@ impl Render for Workspace {
                     .child(ui::activity_bar::render_activity_bar(
                         activity, show_sidebar, &t, cx,
                     ))
+                    // Sidebar: fixed pixel width, resized by dragging the thin
+                    // divider next to it. Not affected by window resize/maximize.
+                    .when(show_sidebar, |row| {
+                        row.child(
+                            div()
+                                .w(px(sidebar_w))
+                                .flex_shrink_0()
+                                .h_full()
+                                .overflow_hidden()
+                                .child(match activity {
+                                    Activity::Explorer => match &root_opt {
+                                        Some(root) => ui::sidebar::explorer::render_tree(
+                                            tree,
+                                            Some(root.as_path()),
+                                            open.as_ref(),
+                                            selected_path.as_ref(),
+                                            explorer_section_expanded,
+                                            inline_creating.as_ref(),
+                                            &display_name(root),
+                                            &t,
+                                            cx,
+                                        ),
+                                        None => ui::welcome::render_no_folder_panel(&t, cx),
+                                    },
+                                    Activity::Search => ui::sidebar::search::render_search_panel(&t),
+                                    Activity::Git => ui::sidebar::git::render_git_panel(&t),
+                                    Activity::Extensions => {
+                                        ui::sidebar::extensions::render_extensions_panel(&t)
+                                    }
+                                }),
+                        )
+                        .child(resize_handle(ResizeKind::Sidebar, &t, cx))
+                    })
                     .child(
-                        // Keep separate layout state for the sidebar-visible and
-                        // sidebar-hidden layouts so the default width is respected.
-                        h_resizable(if show_sidebar {
-                            "workspace-h-resizable-with-sidebar"
-                        } else {
-                            "workspace-h-resizable-editor-only"
-                        })
-                            .when(show_sidebar, |group| {
-                                group.child(
-                                    resizable_panel()
-                                        .size(px(300.0))
-                                        // VS Code-like resizing: default 300px,
-                                        // draggable from a narrow strip up to a
-                                        // wide panel instead of being capped.
-                                        .size_range(px(170.0)..px(800.0))
-                                        .child(match activity {
-                                            Activity::Explorer => match &root_opt {
-                                                Some(root) => ui::sidebar::explorer::render_tree(
-                                                    tree,
-                                                    Some(root.as_path()),
-                                                    open.as_ref(),
-                                                    selected_path.as_ref(),
-                                                    explorer_section_expanded,
-                                                    inline_creating.as_ref(),
-                                                    &display_name(root),
-                                                    &t,
-                                                    cx,
-                                                ),
-                                                None => ui::welcome::render_no_folder_panel(&t, cx),
-                                            },
-                                            Activity::Search => ui::sidebar::search::render_search_panel(&t),
-                                            Activity::Git => ui::sidebar::git::render_git_panel(&t),
-                                            Activity::Extensions => {
-                                                ui::sidebar::extensions::render_extensions_panel(&t)
-                                            }
-                                        }),
-                                )
-                            })
+                                // Editor column absorbs all remaining space; the
+                        // terminal panel below it is also a fixed-pixel panel
+                        // with its own drag divider.
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .flex()
+                            .flex_col()
+                            .overflow_hidden()
                             .child(
-                                resizable_panel().child(
-                                    // Use a separate state when the terminal is visible so it
-                                    // gets its configured initial height instead of inheriting
-                                    // the editor-only layout's minimum panel size.
-                                    v_resizable(if show_terminal {
-                                        "workspace-v-resizable-with-terminal"
-                                    } else {
-                                        "workspace-v-resizable-editor-only"
+                                div()
+                                    .flex_1()
+                                    .min_h(px(0.0))
+                                    .flex()
+                                    .flex_col()
+                                    .bg(rgba(t.editor_bg))
+                                    // Tab bar - only show when tabs exist
+                                    .when(!tabs.is_empty(), |d| {
+                                        d.child(ui::tab_bar::render_tab_bar(&tabs, active_tab, &t, cx))
                                     })
-                                        .child(
-                                            resizable_panel().child(
+                                    // Editor area
+                                    .when(welcome, |d| d.child(ui::welcome::render_welcome(&t, cx)))
+                                    .when(!welcome, |d| {
+                                        if let Some(editor) = editor {
+                                            d.child(
                                                 div()
                                                     .flex_1()
-                                                    .h_full()
-                                                    .min_w(px(0.0))
-                                                    .flex()
-                                                    .flex_col()
-                                                    .bg(rgba(t.editor_bg))
-                                                    // Tab bar - only show when tabs exist
-                                                    .when(!tabs.is_empty(), |d| {
-                                                        d.child(ui::tab_bar::render_tab_bar(&tabs, active_tab, &t, cx))
-                                                    })
-                                                    // Editor area
-                                                    .when(welcome, |d| d.child(ui::welcome::render_welcome(&t, cx)))
-                                                    .when(!welcome, |d| {
-                                                        if let Some(editor) = editor {
-                                                            d.child(
-                                                                div()
-                                                                    .flex_1()
-                                                                    .min_h(px(0.0))
-                                                                    .overflow_hidden()
-                                                                    .font_family(crate::assets::MONO_FONT)
-                                                                    .text_size(px(font_size))
-                                                                    .child(
-                                                                        Input::new(&editor)
-                                                                            .text_size(px(font_size))
-                                                                            .h_full()
-                                                                            .appearance(false)
-                                                                            .bordered(false),
-                                                                    ),
-                                                            )
-                                                        } else {
-                                                            d.flex_1()
-                                                        }
-                                                    }),
-                                            ),
+                                                    .min_h(px(0.0))
+                                                    .overflow_hidden()
+                                                    .font_family(crate::assets::MONO_FONT)
+                                                    .text_size(px(font_size))
+                                                    .child(
+                                                        Input::new(&editor)
+                                                            .text_size(px(font_size))
+                                                            .h_full()
+                                                            .appearance(false)
+                                                            .bordered(false),
+                                                    ),
+                                            )
+                                        } else {
+                                            d.flex_1()
+                                        }
+                                    }),
+                            )
+                            .when(show_terminal, |col| {
+                                if let Some(term) = &terminal {
+                                    col.child(resize_handle(ResizeKind::Terminal, &t, cx))
+                                        .child(
+                                            div()
+                                                .h(px(terminal_h))
+                                                .flex_shrink_0()
+                                                .overflow_hidden()
+                                                .child(crate::terminal::render_terminal(term, &t, cx)),
                                         )
-                                        .when(show_terminal, |group| {
-                                            if let Some(term) = &terminal {
-                                                group.child(
-                                                    resizable_panel()
-                                                        // VS Code opens the terminal as a substantial bottom panel.
-                                                        // Keep this as the default while preserving the drag range.
-                                                        .size(px(320.0))
-                                                        .size_range(px(80.0)..px(2000.0))
-                                                        .child(crate::terminal::render_terminal(term, &t, cx)),
-                                                )
-                                            } else {
-                                                group
-                                            }
-                                        }),
-                                ),
-                            ),
+                                } else {
+                                    col
+                                }
+                            }),
                     ),
             )
             .child(ui::status_bar::render_status_bar(&status, &theme_name, &t))
     }
+}
+
+/// Thin draggable divider between panels (VS Code style): a 5px hit zone
+/// with a 1px visible line that brightens on hover. Grabbing it starts a
+/// panel resize drag handled by the root div's mouse listeners.
+fn resize_handle(kind: ResizeKind, t: &Colors, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let idle = rgba(t.border_variant);
+    let hot = rgba(t.icon);
+    let (id, vertical) = match kind {
+        ResizeKind::Sidebar => ("sidebar-resize-handle", true),
+        ResizeKind::Terminal => ("terminal-resize-handle", false),
+    };
+
+    let line = if vertical {
+        div().w(px(1.0)).h_full()
+    } else {
+        div().h(px(1.0)).w_full()
+    };
+
+    let base = div()
+        .id(id)
+        .occlude()
+        .flex_shrink_0()
+        .group("resize-handle")
+        .flex()
+        .items_center()
+        .justify_center()
+        .hover(|s| s.bg(rgba(t.element_hover)));
+
+    let base = if vertical {
+        base.w(px(5.0)).h_full().cursor_col_resize()
+    } else {
+        base.h(px(5.0)).w_full().cursor_row_resize()
+    };
+
+    base.child(line.bg(idle).group_hover("resize-handle", |s| s.bg(hot)))
+        .on_mouse_down(MouseButton::Left, cx.listener(
+        move |this, ev: &gpui::MouseDownEvent, _, cx| {
+            let (start_mouse, start_size) = match kind {
+                ResizeKind::Sidebar => (f32::from(ev.position.x), this.sidebar_width),
+                ResizeKind::Terminal => (f32::from(ev.position.y), this.terminal_height),
+            };
+            this.panel_resize = Some(PanelResizeDrag {
+                kind,
+                start_mouse,
+                start_size,
+            });
+            cx.stop_propagation();
+            cx.notify();
+        },
+    ))
 }
