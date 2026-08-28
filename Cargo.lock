@@ -140,7 +140,10 @@ dependencies = [
  "portable-pty 0.8.1",
  "rfd",
  "rust-embed",
+ "serde",
  "serde_json",
+ "tree-sitter",
+ "tree-sitter-typescript",
  "url",
  "winres",
 ]

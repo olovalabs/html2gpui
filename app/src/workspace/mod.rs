@@ -146,13 +146,17 @@ pub(crate) struct Workspace {
     pub(crate) git: Option<RepoStatus>,
     /// Pokes the git polling thread to re-run `git status` immediately
     /// (after saves, commits, staging, …).
-    pub(crate) git_poke_tx: Option<async_channel::Sender<()>>,
+    pub(crate) git_poke_tx: Option<std::sync::mpsc::Sender<()>>,
     /// The commit-message input of the source-control panel (created lazily
     /// when the panel is opened).
     pub(crate) git_commit_input: Option<Entity<InputState>>,
     /// Set by the commit input's Enter handler (which has no window handle);
     /// render() runs the commit on the next frame, where the window exists.
     pub(crate) git_commit_pending: bool,
+    /// User preferences loaded from platform settings.json
+    pub(crate) settings: crate::settings::Settings,
+    /// Debounce generation counter for auto-save
+    pub(crate) auto_save_generation: usize,
 }
 
 /// Which divider is being dragged.
@@ -261,6 +265,14 @@ impl Workspace {
         })
         .detach();
 
+        let settings = crate::settings::Settings::load();
+        let themes = theme::all();
+        let theme_ix = themes
+            .iter()
+            .position(|t| t.name == settings.workbench_color_theme)
+            .unwrap_or_else(theme::default_index);
+        let font_size = settings.editor_font_size;
+
         // Start with NO project loaded — the welcome screen offers
         // Open Folder / Open File / New File (VS Code-style).
         Self {
@@ -275,8 +287,10 @@ impl Workspace {
             activity: Activity::Explorer,
             show_sidebar: true,
             show_terminal: false,
-            theme_ix: theme::default_index(),
-            font_size: 14.5,
+            theme_ix,
+            font_size,
+            settings,
+            auto_save_generation: 0,
             lsp,
             diagnostics_by_path: HashMap::new(),
             terminal_tabs: Vec::new(),
@@ -373,6 +387,8 @@ impl Workspace {
             return;
         };
         self.theme_ix = ix;
+        self.settings.workbench_color_theme = th.name.to_string();
+        let _ = self.settings.save();
         // Keep the widget library (inputs, menus, scrollbars…) in sync.
         let mode = if th.appearance == "light" {
             gpui_component::ThemeMode::Light
@@ -436,7 +452,7 @@ impl Workspace {
             self.git = None;
             return;
         };
-        let (poke_tx, poke_rx) = async_channel::unbounded::<()>();
+        let (poke_tx, poke_rx) = std::sync::mpsc::channel::<()>();
         let (status_tx, status_rx) = async_channel::unbounded::<RepoStatus>();
 
         // First snapshot synchronously so the panel is populated before the
@@ -460,8 +476,8 @@ impl Workspace {
                 // Sleep until the next poll, but wake up immediately when the
                 // workspace pokes us (save / commit / stage / …).
                 match poke_rx.recv_timeout(Duration::from_millis(1500)) {
-                    Ok(()) | Err(async_channel::RecvTimeoutError::Timeout) => {}
-                    Err(async_channel::RecvTimeoutError::Closed) => break,
+                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                 }
             }
         });
@@ -488,7 +504,7 @@ impl Workspace {
     /// Ask the git polling thread to re-run `git status` right now.
     pub(crate) fn git_poke(&self) {
         if let Some(tx) = &self.git_poke_tx {
-            let _ = tx.try_send(());
+            let _ = tx.send(());
         }
     }
 
@@ -529,6 +545,8 @@ impl Workspace {
                         cx.notify();
                     }
                 }
+                let tab_idx = this.active_tab;
+                this.trigger_auto_save_after_delay(tab_idx, cx);
             }
         })
         .detach();
@@ -836,13 +854,12 @@ impl Workspace {
                                 ui_changed = true;
                             }
                         }
-                        // Talk to the language server only when one exists for
-                        // this language; plain-text / too-large files skip the
-                        // whole-buffer read that used to run per keystroke.
-                        let mut lsp = this.lsp.lock().unwrap();
-                        if lsp.has_client(&lang_str) {
-                            let text = editor_ent.read(cx).value().to_string();
-                            lsp.change_document(&path_clone, &lang_str, &text);
+                        {
+                            let mut lsp = this.lsp.lock().unwrap();
+                            if lsp.has_client(&lang_str) {
+                                let text = editor_ent.read(cx).value().to_string();
+                                lsp.change_document(&path_clone, &lang_str, &text);
+                            }
                         }
                         // The editor view repaints itself. Only repaint the
                         // workspace chrome (dirty dot / preview promotion)
@@ -852,6 +869,8 @@ impl Workspace {
                         if ui_changed {
                             cx.notify();
                         }
+                        let tab_idx = this.active_tab;
+                        this.trigger_auto_save_after_delay(tab_idx, cx);
                     }
                 })
                 .detach();
@@ -880,9 +899,9 @@ impl Workspace {
                     self.active_tab = self.tabs.len() - 1;
                 }
                 self.status = if highlight {
-                    format!("{} · {}", path.display(), lang::lsp_status(&path))
+                    path.display().to_string()
                 } else {
-                    format!("{}  (plain — highlight off for large files)", path.display())
+                    format!("{} (plain text — large file)", display_name(&path))
                 };
             }
             Err(e) => self.status = format!("open failed: {e}"),
@@ -922,6 +941,9 @@ impl Workspace {
             Ok(()) => {
                 tab.dirty = false;
                 self.git_poke();
+                if path == crate::settings::settings_file_path() {
+                    self.reload_settings(cx);
+                }
                 self.status = format!("Saved {}", display_name(&path));
             }
             Err(e) => self.status = format!("save failed: {e}"),
@@ -993,7 +1015,7 @@ impl Workspace {
                     self.tree = reload_dir_preserving(root, &self.tree);
                 }
                 self.git_poke();
-                self.status = format!("Saved {} · {}", path.display(), lang::lsp_status(&path));
+                self.status = format!("Saved {}", display_name(&path));
             }
             Err(e) => self.status = format!("save failed: {e}"),
         }
@@ -1527,7 +1549,7 @@ impl Workspace {
         &mut self,
         root: PathBuf,
         rels: Vec<String>,
-        op: impl FnOnce(PathBuf, Vec<String>) -> bool + 'static,
+        op: impl FnOnce(PathBuf, Vec<String>) -> bool + Send + 'static,
         success: &'static str,
         cx: &mut Context<Self>,
     ) {
@@ -1692,6 +1714,7 @@ impl Workspace {
         // Load the diff text in the background.
         let tab_path = path.to_path_buf();
         cx.spawn(async move |this, cx| {
+            let tab_path_bg = tab_path.clone();
             let text = cx
                 .background_spawn(async move {
                     let raw = git::diff(&root, &rel, staged).unwrap_or_default();
@@ -1700,7 +1723,7 @@ impl Workspace {
                     } else {
                         // Untracked files have no git diff yet — show the
                         // full content as one big addition.
-                        std::fs::read_to_string(&tab_path)
+                        std::fs::read_to_string(&tab_path_bg)
                             .ok()
                             .map(|content| git::new_file_diff(&rel, &content))
                     }
@@ -1738,13 +1761,14 @@ impl Workspace {
         let staged = diff.staged;
         let tab_path = diff.path.clone();
         cx.spawn(async move |this, cx| {
+            let tab_path_bg = tab_path.clone();
             let text = cx
                 .background_spawn(async move {
                     let raw = git::diff(&root, &rel, staged).unwrap_or_default();
                     if !raw.trim().is_empty() {
                         Some(raw)
                     } else {
-                        std::fs::read_to_string(&tab_path)
+                        std::fs::read_to_string(&tab_path_bg)
                             .ok()
                             .map(|content| git::new_file_diff(&rel, &content))
                     }
@@ -1764,18 +1788,6 @@ impl Workspace {
             });
         })
         .detach();
-    }
-
-    /// Discard the changes shown in the active diff tab.
-    pub(crate) fn discard_active_diff(&mut self, cx: &mut Context<Self>) {
-        let Some(tab) = self.tabs.get(self.active_tab) else {
-            return;
-        };
-        let Some(diff) = tab.diff.as_ref() else {
-            return;
-        };
-        let path = diff.path.clone();
-        self.git_discard_path(&path, cx);
     }
 
     // -- LSP -----------------------------------------------------------------
@@ -1810,6 +1822,7 @@ impl Workspace {
         self.status = "Formatting…".into();
         cx.notify();
         let editor_weak = editor.downgrade();
+        let display = display_name(&path);
         cx.spawn_in(window, async move |this, cx| {
             let edits = cx
                 .background_spawn(async move { client.format_document(&path, &text) })
@@ -1822,7 +1835,7 @@ impl Workspace {
                         state.apply_lsp_edits(&edits, window, cx);
                     });
                     let _ = this.update(cx, |workspace, cx| {
-                        workspace.status = format!("Formatted {}", display_name(&path));
+                        workspace.status = format!("Formatted {display}");
                         cx.notify();
                     });
                 }
@@ -1861,6 +1874,100 @@ impl Workspace {
         }
         self.status = "Settings".into();
         cx.notify();
+    }
+
+    /// Open user settings.json directly in an editor tab.
+    pub(crate) fn open_settings_json(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let path = crate::settings::settings_file_path();
+        if !path.exists() {
+            let _ = self.settings.save();
+        }
+        self.open_file(path, window, cx);
+    }
+
+    /// Reloads settings from disk (e.g. after user edits settings.json).
+    pub(crate) fn reload_settings(&mut self, cx: &mut Context<Self>) {
+        self.settings = crate::settings::Settings::load();
+        let themes = theme::all();
+        if let Some(pos) = themes.iter().position(|t| t.name == self.settings.workbench_color_theme) {
+            self.theme_ix = pos;
+        }
+        self.font_size = self.settings.editor_font_size;
+        gpui_component::Theme::global_mut(cx).mono_font_size = gpui::px(self.font_size);
+        self.status = "Settings reloaded from settings.json".into();
+        cx.notify();
+    }
+
+    /// Quietly saves a single tab by index if dirty and has a valid path.
+    pub(crate) fn save_tab_quiet(&mut self, idx: usize, cx: &mut Context<Self>) -> bool {
+        let Some(tab) = self.tabs.get_mut(idx) else {
+            return false;
+        };
+        if tab.is_settings || !tab.dirty || tab.path.is_none() {
+            return false;
+        }
+        let path = tab.path.clone().unwrap();
+        let Some(editor) = &tab.editor else {
+            return false;
+        };
+        let text = editor.read(cx).value().to_string();
+        if std::fs::write(&path, text.as_bytes()).is_ok() {
+            tab.dirty = false;
+            self.git_poke();
+            if path == crate::settings::settings_file_path() {
+                self.reload_settings(cx);
+            }
+            self.status = format!("Auto-saved {}", display_name(&path));
+            cx.notify();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Saves all dirty tabs that have a file path on disk.
+    pub(crate) fn save_all_dirty_quiet(&mut self, cx: &mut Context<Self>) {
+        let mut saved_any = false;
+        for i in 0..self.tabs.len() {
+            if self.save_tab_quiet(i, cx) {
+                saved_any = true;
+            }
+        }
+        if saved_any {
+            cx.notify();
+        }
+    }
+
+    /// Triggers auto-save after debounce delay when typing stops.
+    pub(crate) fn trigger_auto_save_after_delay(&mut self, _tab_idx: usize, cx: &mut Context<Self>) {
+        if self.settings.editor_auto_save != crate::settings::AutoSaveMode::AfterDelay {
+            return;
+        }
+        self.auto_save_generation = self.auto_save_generation.wrapping_add(1);
+        let current_gen = self.auto_save_generation;
+        let delay = std::time::Duration::from_millis(self.settings.editor_auto_save_delay);
+
+        cx.spawn(async move |this, cx| {
+            cx.background_spawn(async move {
+                std::thread::sleep(delay);
+            })
+            .await;
+
+            let _ = this.update(cx, |workspace, cx| {
+                if workspace.auto_save_generation == current_gen {
+                    workspace.save_all_dirty_quiet(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Triggers auto-save on focus change / tab switch.
+    pub(crate) fn trigger_auto_save_on_focus_change(&mut self, cx: &mut Context<Self>) {
+        if self.settings.editor_auto_save != crate::settings::AutoSaveMode::OnFocusChange {
+            return;
+        }
+        self.save_all_dirty_quiet(cx);
     }
 
     // Tab management methods
@@ -1913,6 +2020,7 @@ impl Workspace {
     /// Switch to a specific tab by index (called from tab bar click)
     pub(crate) fn switch_tab_to(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < self.tabs.len() {
+            self.trigger_auto_save_on_focus_change(cx);
             self.active_tab = index;
             // Clicking a tab also promotes it from preview to permanent (VS Code behavior)
             if let Some(tab) = self.tabs.get_mut(index) {
@@ -1992,6 +2100,8 @@ impl Workspace {
 
     pub(crate) fn increase_font_size(&mut self, cx: &mut Context<Self>) {
         self.font_size = (self.font_size + 1.0).min(36.0);
+        self.settings.editor_font_size = self.font_size;
+        let _ = self.settings.save();
         gpui_component::Theme::global_mut(cx).mono_font_size = gpui::px(self.font_size);
         self.status = format!("Editor font size: {:.1}px", self.font_size);
         cx.notify();
@@ -1999,6 +2109,8 @@ impl Workspace {
 
     pub(crate) fn decrease_font_size(&mut self, cx: &mut Context<Self>) {
         self.font_size = (self.font_size - 1.0).max(9.0);
+        self.settings.editor_font_size = self.font_size;
+        let _ = self.settings.save();
         gpui_component::Theme::global_mut(cx).mono_font_size = gpui::px(self.font_size);
         self.status = format!("Editor font size: {:.1}px", self.font_size);
         cx.notify();
@@ -2006,6 +2118,8 @@ impl Workspace {
 
     pub(crate) fn reset_font_size(&mut self, cx: &mut Context<Self>) {
         self.font_size = 14.5;
+        self.settings.editor_font_size = self.font_size;
+        let _ = self.settings.save();
         gpui_component::Theme::global_mut(cx).mono_font_size = gpui::px(self.font_size);
         self.status = format!("Editor font size reset: {:.1}px", self.font_size);
         cx.notify();

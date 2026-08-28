@@ -105,12 +105,6 @@ impl LspManager {
             .filter(|c| c.is_alive())
     }
 
-    pub fn open_document(&mut self, path: &Path, lang: &str, text: &str, root: Option<&Path>) {
-        if let Some(client) = self.ensure_server(lang, root) {
-            client.did_open(path, lang, text);
-        }
-    }
-
     pub fn change_document(&mut self, path: &Path, lang: &str, text: &str) {
         if let Some(client) = self.clients.get(lang) {
             client.did_change(path, text);
@@ -422,7 +416,7 @@ impl LspClient {
     /// True when the server advertised a capability (or hasn't told us yet —
     /// requests are still safe because they no-op until initialized).
     pub fn supports(&self, pred: impl FnOnce(&lsp_types::ServerCapabilities) -> bool) -> bool {
-        self.capabilities().map(pred).unwrap_or(true)
+        self.capabilities().as_ref().map(pred).unwrap_or(true)
     }
 
     /// The most recent text synced for `path`, used to answer requests that
@@ -471,13 +465,13 @@ impl LspClient {
                     code_action_literal_support: Some(lsp_types::CodeActionLiteralSupport {
                         code_action_kind: lsp_types::CodeActionKindLiteralSupport {
                             value_set: vec![
-                                lsp_types::CodeActionKind::QUICKFIX,
-                                lsp_types::CodeActionKind::REFACTOR,
-                                lsp_types::CodeActionKind::REFACTOR_EXTRACT,
-                                lsp_types::CodeActionKind::REFACTOR_INLINE,
-                                lsp_types::CodeActionKind::REFACTOR_REWRITE,
-                                lsp_types::CodeActionKind::SOURCE,
-                                lsp_types::CodeActionKind::SOURCE_ORGANIZE_IMPORTS,
+                                lsp_types::CodeActionKind::QUICKFIX.as_str().to_string(),
+                                lsp_types::CodeActionKind::REFACTOR.as_str().to_string(),
+                                lsp_types::CodeActionKind::REFACTOR_EXTRACT.as_str().to_string(),
+                                lsp_types::CodeActionKind::REFACTOR_INLINE.as_str().to_string(),
+                                lsp_types::CodeActionKind::REFACTOR_REWRITE.as_str().to_string(),
+                                lsp_types::CodeActionKind::SOURCE.as_str().to_string(),
+                                lsp_types::CodeActionKind::SOURCE_ORGANIZE_IMPORTS.as_str().to_string(),
                             ],
                         },
                     }),
@@ -1021,11 +1015,10 @@ impl CodeActionProvider for LspCodeActionProvider {
                     let state = state.downgrade();
                     let _ = window.spawn(cx, async move |cx| {
                         if let Some(state) = state.upgrade() {
-                            state.update_in(cx, |state, window, cx| {
+                            let _ = state.update_in(cx, |state, window, cx| {
                                 state.apply_lsp_edits(&text_edits, window, cx);
-                            })?;
+                            });
                         }
-                        Ok(())
                     });
                 }
             }
@@ -1317,7 +1310,9 @@ mod tests {
         let test_file = std::env::temp_dir().join("olova_test_bad.ts");
         let bad_code = "function test(x: number): string { return x; }";
 
-        mgr.open_document(&test_file, "typescript", bad_code, None);
+        if let Some(client) = mgr.ensure_server("typescript", None) {
+            client.did_open(&test_file, "typescript", bad_code);
+        }
 
         // Wait up to 5 seconds for diagnostics
         let start = std::time::Instant::now();

@@ -55,5 +55,5 @@ pub(crate) fn section_strip(label: &str, t: &Colors) -> Div {
         .text_size(px(11.0))
         .font_weight(FontWeight::BOLD)
         .text_color(rgba(t.text))
-        .child(SharedString::from(label))
+        .child(SharedString::from(label.to_string()))
 }

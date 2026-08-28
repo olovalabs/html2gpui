@@ -156,37 +156,110 @@ pub fn lsp_binary_for(lang: &str) -> Option<&'static str> {
     })
 }
 
-/// Human-readable LSP availability for the status bar.
-pub fn lsp_status(path: &Path) -> String {
-    let Some(lang) = language_for(path) else {
-        return "plain text".into();
-    };
-    match lsp_binary_for(lang) {
-        Some(bin) if binary_on_path(bin) => format!("{lang} · LSP ready ({bin})"),
-        Some(bin) => format!("{lang} · LSP server '{bin}' not found on PATH"),
-        None => format!("{lang} · no default LSP"),
-    }
-}
+const TSX_HIGHLIGHT_QUERY: &str = r#"
+; Types & Variables
+(identifier) @variable
 
-fn binary_on_path(binary: &str) -> bool {
-    // Windows executables come in several flavors; npm global installs
-    // create .cmd shims (never .exe), so all of them must be probed.
-    const WINDOWS_EXTS: [&str; 3] = [".exe", ".cmd", ".bat"];
-    let candidates: Vec<String> = if cfg!(windows) && !WINDOWS_EXTS.iter().any(|e| binary.ends_with(e))
-    {
-        WINDOWS_EXTS.iter().map(|e| format!("{binary}{e}")).collect()
-    } else {
-        vec![binary.to_string()]
-    };
-    std::env::var_os("PATH")
-        .map(|paths| {
-            std::env::split_paths(&paths).any(|dir| {
-                candidates
-                    .iter()
-                    .any(|name| dir.join(name).is_file())
-            })
-        })
-        .unwrap_or(false)
+; Properties
+(property_identifier) @property
+(shorthand_property_identifier) @property
+(shorthand_property_identifier_pattern) @property
+(private_property_identifier) @property
+
+; Function and method definitions
+(function_expression name: (identifier) @function)
+(function_declaration name: (identifier) @function)
+(method_definition name: (property_identifier) @function)
+(pair
+  key: (property_identifier) @function
+  value: [(function_expression) (arrow_function)])
+(assignment_expression
+  left: (member_expression property: (property_identifier) @function)
+  right: [(function_expression) (arrow_function)])
+(variable_declarator
+  name: (identifier) @function
+  value: [(function_expression) (arrow_function)])
+(assignment_expression
+  left: (identifier) @function
+  right: [(function_expression) (arrow_function)])
+
+; Function and method calls
+(call_expression function: (identifier) @function)
+(call_expression
+  function: (member_expression property: (property_identifier) @function))
+
+; Special identifiers
+((identifier) @type (#match? @type "^[A-Z]"))
+([
+  (identifier)
+  (shorthand_property_identifier)
+  (shorthand_property_identifier_pattern)
+ ] @constant (#match? @constant "^_*[A-Z_][A-Z\\d_]*$"))
+
+((identifier) @variable
+ (#match? @variable "^(arguments|module|console|window|document|process)$"))
+
+; Literals
+(this) @variable
+(super) @variable
+[(true) (false) (null) (undefined)] @constant
+
+(comment) @comment
+
+[(string) (template_string)] @string
+(regex) @string.special
+(number) @number
+
+; JSX Elements & Attributes
+(jsx_opening_element name: (_) @tag)
+(jsx_closing_element name: (_) @tag)
+(jsx_self_closing_element name: (_) @tag)
+(jsx_attribute (property_identifier) @attribute)
+
+; Punctuation & Delimiters
+[";" (optional_chain) "." ","] @punctuation.delimiter
+["-" "--" "-=" "+" "++" "+=" "*" "*=" "**" "**=" "/" "/=" "%" "%="
+ "<" "<=" "<<" "<<=" "=" "==" "===" "!" "!=" "!==" "=>"
+ ">" ">=" ">>" ">>=" ">>>" ">>>=" "~" "^" "&" "|" "^=" "&=" "|="
+ "&&" "||" "??" "&&=" "||=" "??="] @operator
+
+["(" ")" "[" "]" "{" "}"] @punctuation.bracket
+(template_substitution "${" @punctuation.special "}" @punctuation.special) @embedded
+
+; Keywords
+[
+  "as" "async" "await" "break" "case" "catch" "class" "const"
+  "continue" "debugger" "default" "delete" "do" "else" "export"
+  "extends" "finally" "for" "from" "function" "get" "if" "import"
+  "in" "instanceof" "let" "new" "of" "return" "set" "static"
+  "switch" "target" "throw" "try" "typeof" "var" "void" "while"
+  "with" "yield" "abstract" "declare" "enum" "implements"
+  "interface" "keyof" "namespace" "private" "protected" "public"
+  "type" "readonly" "override" "satisfies"
+] @keyword
+
+; Types
+(type_identifier) @type
+(predefined_type) @type
+(type_arguments "<" @punctuation.bracket ">" @punctuation.bracket)
+(required_parameter (identifier) @variable)
+(optional_parameter (identifier) @variable)
+"#;
+
+/// Initializes and registers high-quality Tree-Sitter language definitions for TSX/TypeScript/JSX.
+pub fn init_languages() {
+    use gpui_component::highlighter::{LanguageConfig, LanguageRegistry};
+    let registry = LanguageRegistry::singleton();
+
+    let tsx_config = LanguageConfig::new(
+        "tsx",
+        tree_sitter_typescript::LANGUAGE_TSX.into(),
+        vec!["html".into(), "css".into(), "javascript".into(), "typescript".into()],
+        TSX_HIGHLIGHT_QUERY,
+        "",
+        tree_sitter_typescript::LOCALS_QUERY,
+    );
+    registry.register("tsx", &tsx_config);
 }
 
 #[cfg(test)]
@@ -205,17 +278,9 @@ mod tests {
     }
 
     #[test]
-    fn detects_binaries_on_path() {
-        // A shell is present on every dev machine.
-        let shell = if cfg!(windows) { "cmd" } else { "sh" };
-        assert!(binary_on_path(shell));
-        assert!(!binary_on_path("definitely-not-a-binary-xyz"));
-    }
-
-    #[test]
-    fn maps_lsp_servers() {
-        assert_eq!(lsp_binary_for("rust"), Some("rust-analyzer"));
-        assert_eq!(lsp_binary_for("typescript"), Some("typescript-language-server"));
-        assert_eq!(lsp_binary_for("text"), None);
+    fn test_init_languages() {
+        init_languages();
+        let registry = gpui_component::highlighter::LanguageRegistry::singleton();
+        assert!(registry.language("tsx").is_some());
     }
 }

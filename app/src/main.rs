@@ -11,6 +11,7 @@ mod fs_tree;
 mod git;
 mod lang;
 mod lsp;
+mod settings;
 mod terminal;
 mod theme;
 mod ui;
@@ -81,6 +82,9 @@ fn main() {
             let default_theme = &theme::all()[theme::default_index()];
             gpui_component::Theme::global_mut(cx).highlight_theme =
                 Arc::new(default_theme.highlight_theme());
+
+            // Initialize Tree-Sitter language definitions with rich TSX/JSX queries.
+            lang::init_languages();
 
             // Zed's fonts: IBM Plex Sans (UI) + Lilex (code).
             load_embedded_fonts(cx);

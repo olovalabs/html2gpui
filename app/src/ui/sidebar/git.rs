@@ -162,7 +162,7 @@ fn header_button(
     icon: &'static str,
     action: impl gpui::Action + 'static,
     t: &Colors,
-    window: &mut Window,
+    _window: &mut Window,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
     let _ = tooltip;
@@ -182,7 +182,7 @@ fn header_button(
                 .h(px(14.0))
                 .text_color(rgba(t.icon_muted)),
         )
-        .on_click(cx.listener(move |this, _, window, cx| {
+        .on_click(cx.listener(move |_this, _, window, cx| {
             window.dispatch_action(action.boxed_clone(), cx);
         }))
 }
@@ -224,6 +224,7 @@ fn commit_box(
         .child(input_field)
         .child(
             div()
+                .id("git-commit-btn")
                 .h(px(26.0))
                 .flex()
                 .items_center()
@@ -289,8 +290,11 @@ fn change_row(
         .gap(px(6.0))
         .cursor_pointer()
         .hover(|s| s.bg(rgba(t.ghost_hover)))
-        .on_click(cx.listener(move |this, _, _, cx| {
-            this.open_diff(&path, cx);
+        .on_click(cx.listener({
+            let path = path.clone();
+            move |this, _, _, cx| {
+                this.open_diff(&path, cx);
+            }
         }));
 
     row = row.child(

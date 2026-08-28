@@ -92,14 +92,16 @@ pub(crate) fn render_diff_view(
                         .child(tool_button("Open File", t, cx, {
                             let path = path.clone();
                             move |this, window, cx| {
-                                this.open_file(path, window, cx);
+                                this.open_file(path.clone(), window, cx);
                             }
                         }))
                         .child(tool_button("Discard Changes", t, cx, {
                             let path = path.clone();
                             move |_this, window, cx| {
                                 window.dispatch_action(
-                                    Box::new(GitDiscardFile { path }),
+                                    Box::new(GitDiscardFile {
+                                        path: path.clone(),
+                                    }),
                                     cx,
                                 );
                             }

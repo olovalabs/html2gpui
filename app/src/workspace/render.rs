@@ -326,7 +326,7 @@ impl Render for Workspace {
                                     .when(welcome, |d| d.child(ui::welcome::render_welcome(&t, cx)))
                                     .when(!welcome, |d| {
                                         if is_settings {
-                                            d.child(ui::settings::render_settings(&t, theme_ix, font_size, cx))
+                                            d.child(ui::settings::render_settings(&self.settings, &t, theme_ix, font_size, cx))
                                         } else if let Some(diff) = active_diff {
                                             d.child(ui::diff::render_diff_view(
                                                 diff, font_size, &t, cx,
