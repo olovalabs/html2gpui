@@ -89,7 +89,13 @@ impl Render for Workspace {
         let git_commit_input = self.git_commit_input.clone();
         // Active file language + LSP readiness for the status bar.
         let lang_label = open.and_then(|p| lang::language_for(p));
-        let lsp_ready = lang_label.map(|l| self.lsp.lock().unwrap().has_client(l));
+        let lsp_indicator = {
+            let lsp = self.lsp.lock().unwrap();
+            ui::status_bar::LspIndicator {
+                server: lang_label.and_then(|l| lsp.server_name_for_language(l)),
+                state: lang_label.and_then(|l| lsp.status_for_language(l)),
+            }
+        };
 
         div()
             .size_full()
@@ -375,7 +381,7 @@ impl Render for Workspace {
                 git_branch.as_deref(),
                 git_changes,
                 lang_label,
-                lsp_ready,
+                lsp_indicator,
                 &t,
             ))
             // While a panel divider is being dragged, capture ALL mouse

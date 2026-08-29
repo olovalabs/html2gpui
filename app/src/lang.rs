@@ -5,8 +5,9 @@
 //! exact id list) and by the LSP layer. Detection is extension + filename
 //! based, with a shebang fallback for extension-less scripts.
 //!
-//! `lsp_binary_for` maps a language to the language server binary Zed uses by
-//! default for that language; the binary is looked up on `PATH` at runtime.
+//! `lsp_server_for` maps a language to the language server that handles it;
+//! the full per-server description (how to install it, how to configure it,
+//! which LSP `languageId` to use) lives in `crate::lsp::adapter`.
 
 use std::path::Path;
 
@@ -37,7 +38,10 @@ pub fn language_for(path: &Path) -> Option<&'static str> {
 fn by_extension(ext: &str) -> Option<&'static str> {
     Some(match ext {
         "rs" => "rust",
-        "js" | "mjs" | "cjs" | "jsx" => "javascript",
+        "js" | "mjs" | "cjs" => "javascript",
+        // Kept distinct from plain JS: the server needs the
+        // "javascriptreact" language id to parse JSX syntax.
+        "jsx" => "jsx",
         "ts" | "mts" | "cts" => "typescript",
         "tsx" => "tsx",
         "py" | "pyw" => "python",
@@ -121,39 +125,13 @@ fn shebang_language(path: &Path) -> Option<&'static str> {
     }
 }
 
-/// The language server binary Zed uses by default for this language.
-/// (The `--stdio` / `start` flags live in the LSP spawner.)
-pub fn lsp_binary_for(lang: &str) -> Option<&'static str> {
-    Some(match lang {
-        "rust" => "rust-analyzer",
-        "go" => "gopls",
-        "python" => "basedpyright-langserver",
-        "c" | "cpp" => "clangd",
-        "csharp" => "omnisharp",
-        "javascript" | "typescript" | "tsx" => "typescript-language-server",
-        "lua" => "lua-language-server",
-        "zig" => "zls",
-        "ruby" => "ruby-lsp",
-        "java" => "jdtls",
-        "php" => "intelephense",
-        "bash" => "bash-language-server",
-        "yaml" => "yaml-language-server",
-        "json" => "vscode-json-language-server",
-        "html" => "vscode-html-language-server",
-        "css" | "scss" => "vscode-css-language-server",
-        "markdown" => "marksman",
-        "toml" => "taplo",
-        "sql" => "sql-language-server",
-        "cmake" => "cmake-language-server",
-        "dockerfile" => "dockerfile-language-server-nodejs",
-        "graphql" => "graphql-language-service-cli",
-        "elixir" => "elixir-ls",
-        "swift" => "sourcekit-lsp",
-        "scala" => "metals",
-        "dart" => "dart",
-        "kotlin" => "kotlin-language-server",
-        _ => return None,
-    })
+/// The name of the language server that handles this language, if any.
+///
+/// The authoritative table lives in [`crate::lsp::adapter::ADAPTERS`], which
+/// also knows how to install and configure each server (Zed keeps the same
+/// information in one `LspAdapter` per server rather than in a name map).
+pub fn lsp_server_for(lang: &str) -> Option<&'static str> {
+    crate::lsp::adapter::adapter_for_language(lang).map(|a| a.name)
 }
 
 const TSX_HIGHLIGHT_QUERY: &str = r#"
@@ -260,6 +238,11 @@ pub fn init_languages() {
         tree_sitter_typescript::LOCALS_QUERY,
     );
     registry.register("tsx", &tsx_config);
+
+    // `.jsx` is its own language id (so the LSP layer can send the
+    // "javascriptreact" language id), but syntactically it is TSX minus the
+    // type annotations — the TSX grammar highlights it correctly.
+    registry.register("jsx", &tsx_config);
 }
 
 #[cfg(test)]
@@ -282,5 +265,26 @@ mod tests {
         init_languages();
         let registry = gpui_component::highlighter::LanguageRegistry::singleton();
         assert!(registry.language("tsx").is_some());
+        assert!(registry.language("jsx").is_some());
+    }
+
+    #[test]
+    fn jsx_is_its_own_language_id() {
+        // So the LSP layer can map it to "javascriptreact".
+        assert_eq!(language_for(Path::new("App.jsx")), Some("jsx"));
+        assert_eq!(language_for(Path::new("app.js")), Some("javascript"));
+    }
+
+    #[test]
+    fn web_languages_resolve_to_a_server() {
+        assert_eq!(
+            lsp_server_for("tsx"),
+            Some("typescript-language-server")
+        );
+        assert_eq!(lsp_server_for("css"), Some("vscode-css-language-server"));
+        assert_eq!(lsp_server_for("html"), Some("vscode-html-language-server"));
+        assert_eq!(lsp_server_for("json"), Some("json-language-server"));
+        assert_eq!(lsp_server_for("rust"), Some("rust-analyzer"));
+        assert_eq!(lsp_server_for("plaintext"), None);
     }
 }
