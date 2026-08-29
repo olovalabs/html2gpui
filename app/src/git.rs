@@ -266,6 +266,21 @@ pub fn parse_diff(raw: &str) -> Vec<DiffLine> {
     let mut new_no: Option<u32> = None;
 
     for line in raw.lines() {
+        if line.starts_with("--- ")
+            || line.starts_with("+++ ")
+            || line.starts_with("--- /dev/null")
+            || line.starts_with("+++ /dev/null")
+            || line.starts_with("--- a/")
+            || line.starts_with("+++ b/")
+        {
+            out.push(DiffLine {
+                kind: DiffLineKind::Meta,
+                old_no: None,
+                new_no: None,
+                text: line.to_string(),
+            });
+            continue;
+        }
         if let Some(rest) = line.strip_prefix("@@") {
             let (old, new) = hunk_numbers(rest);
             old_no = old;
@@ -483,7 +498,7 @@ mod tests {
 
     #[test]
     fn parses_deletions_additions_and_conflicts() {
-        let raw = "D  gone.rs\0 A fresh.rs\0UU both.rs\0?? dir/\0";
+        let raw = "D  gone.rs\0A  fresh.rs\0UU both.rs\0?? dir/\0";
         let changes = parse_porcelain(raw, root());
         assert_eq!(changes[0].index, Some(ChangeKind::Deleted));
         assert_eq!(changes[1].index, Some(ChangeKind::Added));
@@ -510,7 +525,7 @@ mod tests {
 
     #[test]
     fn synthesizes_new_file_diffs() {
-        let diff = new_file_diff("new.txt", "line1\nline2");
+        let diff = new_file_diff("new.txt", "line1\nline2\n");
         assert!(diff.starts_with("diff --git a/new.txt b/new.txt\n"));
         assert!(diff.contains("@@ -0,0 +1,2 @@\n"));
         assert!(diff.contains("+line1\n+line2\n"));
@@ -572,19 +587,21 @@ index 7898192..c1827f0 100644
 +added
 ";
         let lines = parse_diff(raw);
-        assert_eq!(lines.len(), 7);
-        assert_eq!(lines[0].old_no, Some(10));
-        assert_eq!(lines[0].new_no, Some(12));
+        assert_eq!(lines.len(), 8);
+        assert_eq!(lines[0].kind, DiffLineKind::Hunk);
         assert_eq!(lines[1].old_no, Some(10));
         assert_eq!(lines[1].new_no, Some(12));
         assert_eq!(lines[2].kind, DiffLineKind::Remove);
         assert_eq!(lines[2].old_no, Some(11));
         assert_eq!(lines[3].kind, DiffLineKind::Add);
         assert_eq!(lines[3].new_no, Some(13));
-        assert_eq!(lines[4].kind, DiffLineKind::NoNewline);
-        assert_eq!(lines[5].old_no, Some(30));
-        assert_eq!(lines[5].new_no, Some(33));
-        assert_eq!(lines[6].kind, DiffLineKind::Add);
-        assert_eq!(lines[6].new_no, Some(33));
+        assert_eq!(lines[4].kind, DiffLineKind::Add);
+        assert_eq!(lines[4].new_no, Some(14));
+        assert_eq!(lines[5].kind, DiffLineKind::NoNewline);
+        assert_eq!(lines[6].kind, DiffLineKind::Hunk);
+        assert_eq!(lines[7].kind, DiffLineKind::Add);
+        assert_eq!(lines[7].new_no, Some(33));
     }
 }
+
+

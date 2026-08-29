@@ -1386,10 +1386,10 @@ impl Workspace {
                     let path = row.path.clone();
                     self.toggle_dir(&path, cx);
                 } else if row.is_dir {
-                    if let Some(next) = rows.get(current_ix + 1)
-                        && next.depth > row.depth
-                    {
-                        self.select_explorer_index(current_ix + 1, cx);
+                    if let Some(next) = rows.get(current_ix + 1) {
+                        if next.depth > row.depth {
+                            self.select_explorer_index(current_ix + 1, cx);
+                        }
                     }
                 }
             }
@@ -1647,10 +1647,10 @@ impl Workspace {
                     if let Some(parent) = path.parent().map(|path| path.to_path_buf()) {
                         self.reload_dir(&parent, cx);
                     }
-                    if let Some(parent) = new_path.parent().map(|path| path.to_path_buf())
-                        && Some(parent.as_path()) != path.parent()
-                    {
-                        self.reload_dir(&parent, cx);
+                    if let Some(parent) = new_path.parent().map(|path| path.to_path_buf()) {
+                        if Some(parent.as_path()) != path.parent() {
+                            self.reload_dir(&parent, cx);
+                        }
                     }
                     self.git_poke();
                     self.status = format!("Renamed to {}", display_name(&new_path));
