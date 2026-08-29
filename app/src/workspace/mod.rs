@@ -203,6 +203,33 @@ impl Workspace {
                                 cx.notify();
                             });
                         }
+                        // A background npm install finished: start the
+                        // server and hand it every buffer it can analyse.
+                        LspEvent::ServerReady { server } => {
+                            let _ = this.update(cx, |workspace, cx| {
+                                workspace.lsp.lock().unwrap().finish_install(&server);
+                                workspace.status = format!("{server} ready");
+                                workspace.start_server_for_open_buffers(&server, cx);
+                                cx.notify();
+                            });
+                        }
+                        LspEvent::ServerFailed { server, reason } => {
+                            let _ = this.update(cx, |workspace, cx| {
+                                workspace
+                                    .lsp
+                                    .lock()
+                                    .unwrap()
+                                    .set_failed(&server, reason.clone());
+                                workspace.status = format!("{server}: {reason}");
+                                cx.notify();
+                            });
+                        }
+                        LspEvent::Initialized { server } => {
+                            let _ = this.update(cx, |workspace, cx| {
+                                workspace.lsp.lock().unwrap().set_running(&server);
+                                cx.notify();
+                            });
+                        }
                     }
                 }
             }
@@ -414,6 +441,10 @@ impl Workspace {
     pub(crate) fn load_root(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.root = Some(path.clone());
         self.root_display = display_name(&path);
+        // Re-root the language servers. A server's project graph (tsconfig,
+        // package.json, node_modules) is bound to the directory it was
+        // started in, so opening a different folder has to restart them.
+        self.lsp.lock().unwrap().set_root(Some(path.clone()));
         self.tree = load_dir(&path);
         self.explorer_section_expanded = true;
         self.selected_path = None;
@@ -825,23 +856,10 @@ impl Workspace {
                 // Notify LSP of document open and wire the editor up to the
                 // server: completions, hover, go-to-definition and code
                 // actions are driven by gpui-component's `InputState::lsp`
-                // provider hooks (the same surface Zed uses).
-                let root_path = self.root.clone();
-                let client = self
-                    .lsp
-                    .lock()
-                    .unwrap()
-                    .ensure_server(lang_id, root_path.as_deref());
-                if let Some(client) = &client {
-                    client.did_open(&path, lang_id, &text);
-                }
-                if let Some(client) = client {
-                    let client = client.clone();
-                    let lsp_path = path.clone();
-                    editor.update(cx, move |state, _cx| {
-                        crate::lsp::attach_lsp_providers(state, client, lsp_path);
-                    });
-                }
+                // provider hooks (the same surface Zed uses). If the server
+                // still has to be installed this returns false and the buffer
+                // is attached automatically once the install finishes.
+                self.attach_language_server(&path, lang_id, &editor, cx);
 
                 // Subscribe to change events - also handles promoting preview to permanent
                 let path_clone = path.clone();
@@ -948,6 +966,14 @@ impl Workspace {
         match std::fs::write(&path, text.as_bytes()) {
             Ok(()) => {
                 tab.dirty = false;
+                // Tell the server the file hit disk: ESLint, gopls and
+                // rust-analyzer run their heavier checks on save.
+                if let Some(lang_id) = lang::language_for(&path) {
+                    self.lsp
+                        .lock()
+                        .unwrap()
+                        .save_document(&path, lang_id, &text);
+                }
                 self.git_poke();
                 if path == crate::settings::settings_file_path() {
                     self.reload_settings(cx);
@@ -1000,23 +1026,8 @@ impl Workspace {
                 }
                 // Bring the language server up for the new file and connect
                 // the editor's LSP providers to it.
-                let root_path = self.root.clone();
-                let client = self
-                    .lsp
-                    .lock()
-                    .unwrap()
-                    .ensure_server(lang_id, root_path.as_deref());
-                if let Some(client) = &client {
-                    client.did_open(&path, lang_id, &text);
-                }
-                if let Some(client) = client {
-                    let client = client.clone();
-                    let lsp_path = path.clone();
-                    if let Some(editor) = self.tabs.get(active_idx).and_then(|t| t.editor.clone()) {
-                        editor.update(cx, move |state, _cx| {
-                            crate::lsp::attach_lsp_providers(state, client, lsp_path);
-                        });
-                    }
+                if let Some(editor) = self.tabs.get(active_idx).and_then(|t| t.editor.clone()) {
+                    self.attach_language_server(&path, lang_id, &editor, cx);
                 }
                 self.selected_path = Some(path.clone());
                 if let Some(root) = &self.root {
@@ -1321,6 +1332,76 @@ impl Workspace {
             }
         }
         cx.notify();
+    }
+
+    /// Bring a language server up for `path` and connect `editor` to it.
+    ///
+    /// This is the single entry point every code path uses (open file, save
+    /// as, post-install retry), so a buffer can never end up half-wired —
+    /// e.g. with diagnostics arriving but no completion provider attached.
+    ///
+    /// Returns `false` when no server is available *yet*; the manager will
+    /// have started an install if one is possible, and the buffer gets picked
+    /// up by [`Self::start_server_for_open_buffers`] once it finishes.
+    pub(crate) fn attach_language_server(
+        &mut self,
+        path: &Path,
+        lang_id: &str,
+        editor: &Entity<InputState>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let root = self.root.clone();
+        let client = {
+            let mut lsp = self.lsp.lock().unwrap();
+            lsp.ensure_server(lang_id, root.as_deref())
+        };
+        let Some(client) = client else {
+            return false;
+        };
+
+        let text = editor.read(cx).value().to_string();
+        client.did_open(path, lang_id, &text);
+
+        let attach_client = client.clone();
+        let lsp_path = path.to_path_buf();
+        editor.update(cx, move |state, _cx| {
+            crate::lsp::attach_lsp_providers(state, attach_client, lsp_path);
+        });
+        true
+    }
+
+    /// After a server finishes installing, open every buffer it handles.
+    ///
+    /// Without this the user would have to close and reopen the file they
+    /// were already looking at to get diagnostics — the exact papercut Zed
+    /// avoids by re-registering buffers when a server starts.
+    pub(crate) fn start_server_for_open_buffers(
+        &mut self,
+        server: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let languages: Vec<&'static str> = self
+            .lsp
+            .lock()
+            .unwrap()
+            .languages_for_server(server)
+            .to_vec();
+
+        // Collect first: attaching borrows `self` mutably.
+        let targets: Vec<(PathBuf, &'static str, Entity<InputState>)> = self
+            .tabs
+            .iter()
+            .filter_map(|tab| {
+                let path = tab.path.clone()?;
+                let editor = tab.editor.clone()?;
+                let lang = lang::language_for(&path)?;
+                languages.contains(&lang).then_some((path, lang, editor))
+            })
+            .collect();
+
+        for (path, lang, editor) in targets {
+            self.attach_language_server(&path, lang, &editor, cx);
+        }
     }
 
     pub(crate) fn apply_diagnostics(
@@ -1927,6 +2008,12 @@ impl Workspace {
         let text = editor.read(cx).value().to_string();
         if std::fs::write(&path, text.as_bytes()).is_ok() {
             tab.dirty = false;
+            if let Some(lang_id) = lang::language_for(&path) {
+                self.lsp
+                    .lock()
+                    .unwrap()
+                    .save_document(&path, lang_id, &text);
+            }
             self.git_poke();
             if path == crate::settings::settings_file_path() {
                 self.reload_settings(cx);

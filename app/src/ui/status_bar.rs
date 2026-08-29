@@ -6,13 +6,43 @@ use gpui::{div, prelude::*, px, rgba, svg, FontWeight, IntoElement, SharedString
 use crate::theme::Colors;
 
 #[allow(clippy::too_many_arguments)]
+/// What the status bar shows about the language server for the active file.
+///
+/// Mirrors the progression Zed surfaces (checking → downloading → starting →
+/// running), so a first-run `npm install` looks like progress rather than a
+/// hang.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct LspIndicator {
+    /// Server name, e.g. `typescript-language-server`.
+    pub server: Option<&'static str>,
+    pub state: Option<crate::lsp::ServerStatus>,
+}
+
+impl LspIndicator {
+    /// Glyph + colour + tooltip-ish label for the current state.
+    fn parts(&self, t: &Colors) -> (&'static str, u32, String) {
+        use crate::lsp::ServerStatus::*;
+        match (&self.state, self.server) {
+            (Some(Running), Some(name)) => ("●", t.vc_added, name.to_string()),
+            (Some(Starting), Some(name)) => ("◐", t.vc_modified, format!("{name}: starting…")),
+            (Some(Installing), Some(name)) => {
+                ("◌", t.vc_modified, format!("{name}: installing…"))
+            }
+            (Some(Failed(reason)), _) => ("○", t.vc_deleted, reason.clone()),
+            (None, Some(name)) => ("○", t.text_muted, name.to_string()),
+            _ => ("○", t.text_muted, "no language server".to_string()),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_status_bar(
     status: &str,
     theme_name: &str,
     git_branch: Option<&str>,
     git_changes: usize,
     lang: Option<&str>,
-    lsp_ready: Option<bool>,
+    lsp: LspIndicator,
     t: &Colors,
 ) -> impl IntoElement {
     div()
@@ -67,14 +97,9 @@ pub(crate) fn render_status_bar(
                             ),
                     )
                 })
-                // Active file language + LSP connection state.
+                // Active file language + language-server state.
                 .when_some(lang, |bar, lang| {
-                    let ready = lsp_ready.unwrap_or(false);
-                    let (dot, dot_color) = if ready {
-                        ("●", t.vc_added)
-                    } else {
-                        ("○", t.text_muted)
-                    };
+                    let (dot, dot_color, label) = lsp.parts(t);
                     bar.child(
                         div()
                             .flex()
@@ -86,7 +111,17 @@ pub(crate) fn render_status_bar(
                                     .text_color(rgba(dot_color))
                                     .child(SharedString::from(dot)),
                             )
-                            .child(SharedString::from(lang.to_string())),
+                            .child(SharedString::from(lang.to_string()))
+                            // The server name / progress, dimmed next to the
+                            // language so the useful detail (which server,
+                            // and whether it is still installing) is visible
+                            // without hovering.
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(rgba(t.text_muted))
+                                    .child(SharedString::from(label)),
+                            ),
                     )
                 })
                 .child(

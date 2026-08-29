@@ -29,12 +29,56 @@ Zed theme files consumed two ways:
 
 ## Language servers
 
-`src/lang.rs` maps each language to the LSP binary Zed uses by default
-(rust-analyzer, gopls, basedpyright, clangd, typescript-language-server,
-zls, …), detects it on PATH and reports readiness in the status bar when you
-open a matching file. Wiring an actual server process (JSON-RPC stdio →
-diagnostics/completions via the library's `DiagnosticSet` / `Lsp` provider
-APIs) is the next milestone.
+Errors, warnings, completions, hover, go-to-definition and quick fixes are
+live, and the Node-based servers **install themselves on first use** — no
+`npm i -g`, no PATH setup. The design follows Zed's, split the same three ways:
+
+| Zed | here | responsibility |
+|---|---|---|
+| `crates/node_runtime` | `src/lsp/node.rs` | find Node, `npm install` servers on demand |
+| `crates/languages` (`LspAdapter` impls) | `src/lsp/adapter.rs` | per-server binary, init options, settings, language ids |
+| `crates/lsp`, `crates/project/src/lsp_store.rs` | `src/lsp/client.rs` | JSON-RPC transport, document sync, diagnostics, providers |
+
+Open `App.tsx` in a project with nothing installed and you get:
+
+1. `lang.rs` → `tsx` → the `typescript-language-server` adapter.
+2. Nothing installed, so a background `npm install typescript-language-server
+   typescript@6` runs into a **private** container dir
+   (`~/.local/share/olova-editor/language-servers/<server>`, mirroring Zed's
+   `~/.local/share/zed/languages/`) — never a global prefix, never your
+   project. The status bar shows `◌ installing…`.
+3. Install finishes → the server starts and every already-open buffer it
+   handles is attached, so you don't have to reopen the file you're looking at.
+4. `initialize` → the client answers the server's `workspace/configuration`
+   request from the adapter → diagnostics start flowing.
+5. A version marker makes every later launch instant and offline-clean.
+
+Auto-installed (Node): `typescript-language-server` (ts/js/tsx/jsx, one
+process for all four so imports resolve across files), `vscode-css-language-server`,
+`vscode-html-language-server`, `json-language-server`, `yaml-language-server`,
+`bash-language-server`, `docker-langserver`.
+Looked up on PATH (toolchain-owned): rust-analyzer, gopls, basedpyright,
+clangd, zls, lua-language-server, taplo, intelephense, ruby-lsp.
+
+### Two things that are easy to get wrong
+
+Both were verified against the real servers rather than assumed:
+
+* **`workspace/configuration` must be answered.** The VS Code-derived servers
+  ask for their settings right after `initialized` and publish *nothing* until
+  they get a reply. Replying `-32601` (the obvious "we implement no server
+  requests" default) yields **0 diagnostics for CSS and HTML** while
+  TypeScript still works — which is exactly the "works for some languages, not
+  others" symptom. Answering with the adapter's config blob takes both from
+  0 → 2 diagnostics on a broken fixture. This is why
+  `capabilities.workspace.configuration = true` and `handle_server_request`
+  exist.
+* **Request ids are `integer | string`.** A client that only parses integer
+  ids silently drops string-id requests and deadlocks the servers that use
+  them.
+
+Note that `vscode-html-language-server` validates *embedded* CSS/JS rather
+than HTML tag nesting — it does not flag an unclosed `<div>`, matching VS Code.
 
 ## Fonts — Zed's shipped set
 

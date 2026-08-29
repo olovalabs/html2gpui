@@ -1,9 +1,13 @@
-//! Ready-made Language Server Protocol (LSP) client manager.
+//! LSP transport + client manager — the analogue of Zed's `crates/lsp` and
+//! `crates/project/src/lsp_store.rs`.
 //!
-//! Spawns and communicates with standard language servers (e.g.
-//! `typescript-language-server`, `rust-analyzer`, `gopls`, `pyright`) over
-//! stdio using JSON-RPC and `lsp-types`. Diagnostics are streamed to the
-//! workspace and rendered as real-time squiggly underlines.
+//! Spawns and communicates with language servers over stdio using JSON-RPC
+//! and `lsp-types`. Diagnostics are streamed to the workspace and rendered as
+//! real-time squiggly underlines.
+//!
+//! Which server to run, how to invoke it and what to configure it with all
+//! come from [`super::adapter`]; installing Node-based servers is
+//! [`super::node`]'s job. This module only owns the protocol.
 //!
 //! Besides the streaming notifications, the client supports synchronous
 //! request/response pairs (`textDocument/completion`, `textDocument/hover`,
@@ -12,7 +16,7 @@
 //! provider hooks of gpui-component's `InputState::lsp` — the same surface
 //! Zed's editor uses to talk to language servers.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::ops::Range as StdRange;
 use std::path::{Path, PathBuf};
@@ -52,15 +56,59 @@ pub enum LspEvent {
         path: PathBuf,
         diagnostics: Vec<lsp_types::Diagnostic>,
     },
-    #[allow(dead_code)]
+    /// A transient message for the status bar.
     Status {
         lang: String,
         message: String,
     },
+    /// A background install finished; the server can now be started.
+    ServerReady {
+        server: String,
+    },
+    /// A server could not be installed or started.
+    ServerFailed {
+        server: String,
+        reason: String,
+    },
+    /// The `initialize` handshake completed.
+    Initialized {
+        server: String,
+    },
 }
 
+/// Lifecycle of one language server, surfaced in the status bar.
+///
+/// Zed shows the same progression in its status bar / "language server logs":
+/// checking → downloading/installing → starting → running.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ServerStatus {
+    /// npm install in progress (Zed: "Downloading <server>…").
+    Installing,
+    /// Process spawned, `initialize` handshake in flight.
+    Starting,
+    /// Handshake finished; diagnostics and completions are live.
+    Running,
+    /// Not usable, with a user-facing reason.
+    Failed(String),
+}
+
+/// Owns one `LspClient` per *server*, spawns them on demand and installs
+/// Node-based servers in the background.
+///
+/// Note the key change versus a naive design: clients are keyed by **server
+/// name**, not by language. `typescript-language-server` serves `.ts`, `.js`,
+/// `.tsx` and `.jsx` from a single process that shares one project graph —
+/// which is what lets a rename in `a.ts` show an error in `b.tsx`. Keying by
+/// language would spawn four servers that each see a quarter of the project.
+/// Zed does the same via `LanguageServerName`.
 pub struct LspManager {
+    /// server name → client
     clients: HashMap<String, Arc<LspClient>>,
+    /// server name → status
+    statuses: HashMap<String, ServerStatus>,
+    /// Servers whose background install has been kicked off already.
+    installing: HashSet<String>,
+    root: Option<PathBuf>,
     event_tx: async_channel::Sender<LspEvent>,
     event_rx: async_channel::Receiver<LspEvent>,
 }
@@ -70,6 +118,9 @@ impl LspManager {
         let (event_tx, event_rx) = async_channel::unbounded();
         Self {
             clients: HashMap::new(),
+            statuses: HashMap::new(),
+            installing: HashSet::new(),
+            root: None,
             event_tx,
             event_rx,
         }
@@ -79,57 +130,238 @@ impl LspManager {
         self.event_rx.clone()
     }
 
-    /// Ensure an LSP server is running for the given language and workspace root.
+    /// Set the workspace root. Servers started later are rooted here, which is
+    /// what lets them read `tsconfig.json` / `package.json` and resolve
+    /// imports across the project.
+    pub fn set_root(&mut self, root: Option<PathBuf>) {
+        if self.root != root {
+            self.root = root;
+            // Restart everything: a language server's project graph is bound
+            // to its root, so an old client would keep serving the old
+            // project. Zed likewise restarts servers when worktrees change.
+            self.clients.clear();
+            self.statuses.clear();
+            self.installing.clear();
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn root(&self) -> Option<&Path> {
+        self.root.as_deref()
+    }
+
+    /// Ensure a server is running for `lang`, installing it first if needed.
+    ///
+    /// Never blocks: if the server has to be installed, this kicks off a
+    /// background `npm install`, reports [`ServerStatus::Installing`] and
+    /// returns `None`. The install thread emits [`LspEvent::ServerReady`]
+    /// when it finishes so the UI can retry and open its documents.
     pub fn ensure_server(
         &mut self,
         lang: &str,
         root_dir: Option<&Path>,
     ) -> Option<Arc<LspClient>> {
-        if let Some(client) = self.clients.get(lang) {
+        let adapter = super::adapter::adapter_for_language(lang)?;
+        let name = adapter.name;
+
+        if let Some(client) = self.clients.get(name) {
             if client.is_alive() {
                 return Some(client.clone());
             }
+            // The server died (crash, OOM). Drop it and respawn below —
+            // Zed's supervisor does the same.
+            self.clients.remove(name);
         }
 
-        let binary = crate::lang::lsp_binary_for(lang)?;
-        let client = Arc::new(LspClient::spawn(binary, lang, root_dir, self.event_tx.clone())?);
-        self.clients.insert(lang.to_string(), client.clone());
-        Some(client)
+        let root = root_dir.map(Path::to_path_buf).or_else(|| self.root.clone());
+
+        match adapter.source {
+            super::adapter::Source::Native { binary } => {
+                let Some(program) = find_binary_on_path(binary) else {
+                    self.statuses.insert(
+                        name.to_string(),
+                        ServerStatus::Failed(format!("{binary} is not installed or not on PATH")),
+                    );
+                    return None;
+                };
+                self.spawn_client(adapter, program, adapter.args.iter().map(|s| s.to_string()).collect(), root)
+            }
+            super::adapter::Source::Npm { package, entry } => {
+                match super::node::resolve_npm_server(name, entry, adapter.args) {
+                    super::node::Resolved::Ready { program, args } => {
+                        self.spawn_client(adapter, program, args, root)
+                    }
+                    super::node::Resolved::Unavailable(reason) => {
+                        self.statuses
+                            .insert(name.to_string(), ServerStatus::Failed(reason));
+                        None
+                    }
+                    super::node::Resolved::NeedsInstall => {
+                        self.start_install(name, package, entry, adapter);
+                        None
+                    }
+                }
+            }
+        }
     }
 
-    /// The running client for `lang`, if any (no spawning).
+    /// Spawn a client for a resolved executable and record its status.
+    fn spawn_client(
+        &mut self,
+        adapter: &'static super::adapter::ServerAdapter,
+        program: PathBuf,
+        args: Vec<String>,
+        root: Option<PathBuf>,
+    ) -> Option<Arc<LspClient>> {
+        let name = adapter.name;
+        match LspClient::spawn(adapter, program, args, root.as_deref(), self.event_tx.clone()) {
+            Some(client) => {
+                let client = Arc::new(client);
+                self.clients.insert(name.to_string(), client.clone());
+                self.statuses
+                    .insert(name.to_string(), ServerStatus::Starting);
+                Some(client)
+            }
+            None => {
+                self.statuses.insert(
+                    name.to_string(),
+                    ServerStatus::Failed(format!("failed to start {name}")),
+                );
+                None
+            }
+        }
+    }
+
+    /// Kick off a background npm install for a server (once).
+    fn start_install(
+        &mut self,
+        name: &'static str,
+        package: &'static str,
+        entry: &'static str,
+        adapter: &'static super::adapter::ServerAdapter,
+    ) {
+        if !self.installing.insert(name.to_string()) {
+            return;
+        }
+        self.statuses
+            .insert(name.to_string(), ServerStatus::Installing);
+
+        let mut packages = vec![format!("{package}@latest")];
+        packages.extend(adapter.extra_npm_packages().iter().map(|p| p.to_string()));
+
+        let tx = self.event_tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.try_send(LspEvent::Status {
+                lang: name.to_string(),
+                message: format!("Installing {package}…"),
+            });
+            match super::node::install_npm_server(name, &packages, entry) {
+                Ok(_) => {
+                    let _ = tx.try_send(LspEvent::ServerReady {
+                        server: name.to_string(),
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.try_send(LspEvent::ServerFailed {
+                        server: name.to_string(),
+                        reason: e,
+                    });
+                }
+            }
+        });
+    }
+
+    /// Clear the in-flight install flag so the server can be started.
+    pub fn finish_install(&mut self, server: &str) {
+        self.installing.remove(server);
+    }
+
+    /// Record a terminal failure for a server.
+    pub fn set_failed(&mut self, server: &str, reason: String) {
+        self.installing.remove(server);
+        self.statuses
+            .insert(server.to_string(), ServerStatus::Failed(reason));
+    }
+
+    /// Mark a server as fully initialized.
+    pub fn set_running(&mut self, server: &str) {
+        self.statuses
+            .insert(server.to_string(), ServerStatus::Running);
+    }
+
+    /// The languages a server handles, for reopening documents after install.
+    pub fn languages_for_server(&self, server: &str) -> &'static [&'static str] {
+        super::adapter::adapter_by_name(server)
+            .map(|a| a.languages)
+            .unwrap_or(&[])
+    }
+
+    /// The running client for `lang`, if any (no spawning, no installing).
     pub fn client_for(&self, lang: &str) -> Option<Arc<LspClient>> {
+        let adapter = super::adapter::adapter_for_language(lang)?;
         self.clients
-            .get(lang)
+            .get(adapter.name)
             .cloned()
             .filter(|c| c.is_alive())
     }
 
+    /// Status of the server that handles `lang`.
+    pub fn status_for_language(&self, lang: &str) -> Option<ServerStatus> {
+        let adapter = super::adapter::adapter_for_language(lang)?;
+        // A live, initialized client outranks a stale stored status.
+        if let Some(client) = self.clients.get(adapter.name) {
+            if client.is_alive() {
+                return Some(if client.is_ready() {
+                    ServerStatus::Running
+                } else {
+                    ServerStatus::Starting
+                });
+            }
+        }
+        self.statuses.get(adapter.name).cloned()
+    }
+
+    /// The server name handling `lang`, for status display.
+    pub fn server_name_for_language(&self, lang: &str) -> Option<&'static str> {
+        super::adapter::adapter_for_language(lang).map(|a| a.name)
+    }
+
     pub fn change_document(&mut self, path: &Path, lang: &str, text: &str) {
-        if let Some(client) = self.clients.get(lang) {
+        if let Some(client) = self.client_for(lang) {
             client.did_change(path, text);
         }
     }
 
     pub fn close_document(&mut self, path: &Path, lang: &str) {
-        if let Some(client) = self.clients.get(lang) {
+        if let Some(client) = self.client_for(lang) {
             client.did_close(path);
         }
     }
 
-    /// True when an LSP client is running for `lang`.
+    /// Notify the server that a document was saved. Servers like ESLint and
+    /// gopls only run some checks on save (Zed sends this from its buffer
+    /// store on every save).
+    pub fn save_document(&mut self, path: &Path, lang: &str, text: &str) {
+        if let Some(client) = self.client_for(lang) {
+            client.did_save(path, text);
+        }
+    }
+
+    /// True when a live client exists for `lang`.
     ///
     /// Lets the UI skip whole-buffer reads and coalescing work on every
-    /// keystroke when no server exists for the language (e.g. plain text or
-    /// a server binary that isn't installed).
+    /// keystroke when no server exists for the language.
     pub fn has_client(&self, lang: &str) -> bool {
-        self.clients.contains_key(lang)
+        self.client_for(lang).is_some()
     }
 }
 
 pub struct LspClient {
+    /// The adapter that configures this server (Zed's `LspAdapter`).
+    pub adapter: &'static super::adapter::ServerAdapter,
+    /// Workspace root this server was started in.
     #[allow(dead_code)]
-    pub lang: String,
+    pub root: Option<PathBuf>,
     /// Outbound framed messages, drained by a dedicated writer thread so a
     /// slow language server (full stdin pipe) can never stall the UI thread.
     /// The channel is unbounded, so `send` never blocks.
@@ -161,40 +393,21 @@ pub struct LspClient {
 }
 
 impl LspClient {
+    /// Spawn an already-resolved server executable.
+    ///
+    /// `program` + `args` come from the adapter layer: for Node servers that
+    /// is our managed `node` plus the server's JS entry point, exactly like
+    /// Zed's `LanguageServerBinary`. No shell, no `.cmd` shim, no PATH
+    /// guessing at this level.
     pub fn spawn(
-        binary: &str,
-        lang: &str,
+        adapter: &'static super::adapter::ServerAdapter,
+        program: PathBuf,
+        args: Vec<String>,
         root_dir: Option<&Path>,
         event_tx: async_channel::Sender<LspEvent>,
     ) -> Option<Self> {
-        let bin_path = find_binary_on_path(binary);
-        let mut cmd = if cfg!(windows) {
-            let mut c = Command::new("cmd");
-            if let Some(ref p) = bin_path {
-                c.args(["/C", &p.to_string_lossy()]);
-            } else {
-                c.args(["/C", binary]);
-            }
-            c
-        } else if let Some(ref p) = bin_path {
-            Command::new(p)
-        } else {
-            Command::new(binary)
-        };
-
-        // Add standard stdio flags for language servers that require them
-        match binary {
-            "typescript-language-server" | "basedpyright-langserver" | "pyright-langserver" => {
-                cmd.arg("--stdio");
-            }
-            "bash-language-server" => {
-                cmd.arg("start");
-            }
-            "vscode-html-language-server" | "vscode-css-language-server" => {
-                cmd.arg("--stdio");
-            }
-            _ => {}
-        }
+        let mut cmd = Command::new(&program);
+        cmd.args(&args);
 
         if let Some(root) = root_dir {
             cmd.current_dir(root);
@@ -202,15 +415,37 @@ impl LspClient {
 
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::null());
+        // Keep stderr: language servers report fatal misconfiguration there,
+        // and swallowing it is why "no diagnostics" bugs are so hard to
+        // diagnose. A reader thread below logs it.
+        cmd.stderr(Stdio::piped());
+
+        // Don't pop up a console window for each server on Windows.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
 
         let mut child = match cmd.spawn() {
             Ok(child) => child,
             Err(e) => {
-                eprintln!("[LSP] failed to spawn '{binary}': {e}");
+                eprintln!("[LSP] failed to spawn '{}': {e}", adapter.name);
                 return None;
             }
         };
+
+        // Drain stderr so a chatty server can never fill the pipe and wedge.
+        if let Some(stderr) = child.stderr.take() {
+            let name = adapter.name;
+            thread::spawn(move || {
+                let reader = BufReader::new(stderr);
+                for line in reader.lines().map_while(Result::ok) {
+                    eprintln!("[LSP: {name}] {line}");
+                }
+            });
+        }
 
         let stdin = child.stdin.take()?;
         let stdout = child.stdout.take()?;
@@ -238,7 +473,8 @@ impl LspClient {
         let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>();
 
         let client = Self {
-            lang: lang.to_string(),
+            adapter,
+            root: root_dir.map(Path::to_path_buf),
             out: out_tx.clone(),
             versions: versions.clone(),
             is_alive: is_alive.clone(),
@@ -283,7 +519,8 @@ impl LspClient {
         }
 
         // Spawn stdout reader thread
-        let lang_str = lang.to_string();
+        let lang_str = adapter.name.to_string();
+        let root_for_reader = root_dir.map(Path::to_path_buf);
         let is_alive_clone = is_alive.clone();
         let is_init_clone = is_initialized.clone();
         let out_for_init = out_tx.clone();
@@ -299,11 +536,33 @@ impl LspClient {
             while *is_alive_clone.lock().unwrap() {
                 match read_message(&mut reader) {
                     Ok(Some(mut msg)) => {
-                        let id = msg.get("id").and_then(Value::as_i64);
+                        // Per the spec a request id is `integer | string`.
+                        // Some servers (metals, and jdtls under load) use
+                        // string ids, so a client that only reads integers
+                        // silently drops their requests and deadlocks them.
+                        let raw_id = msg.get("id").cloned().filter(|v| !v.is_null());
+                        let id = raw_id.as_ref().and_then(Value::as_i64);
                         let method = msg
                             .get("method")
                             .and_then(Value::as_str)
                             .map(str::to_string);
+
+                        // A server-initiated *request* (has both id and
+                        // method) must always be answered. Zed registers
+                        // handlers for these; the VS Code family of servers
+                        // publishes no diagnostics at all until
+                        // `workspace/configuration` is answered.
+                        if let (Some(req_id), Some(m)) = (raw_id.clone(), method.as_deref()) {
+                            handle_server_request(
+                                adapter,
+                                root_for_reader.as_deref(),
+                                req_id,
+                                m,
+                                msg.get("params"),
+                                &out_for_init,
+                            );
+                            continue;
+                        }
 
                         match (id, method.as_deref()) {
                             // The `initialize` response (id 1, no method).
@@ -329,6 +588,29 @@ impl LspClient {
                                     "params": InitializedParams {}
                                 });
                                 send_framed(&out_for_init, &initialized);
+
+                                // Push our settings proactively. Servers that
+                                // registered for `didChangeConfiguration`
+                                // (yaml, eslint, json) apply validation
+                                // settings from this rather than pulling
+                                // them, so sending it is what turns their
+                                // diagnostics on.
+                                let settings =
+                                    adapter.workspace_configuration("", root_for_reader.as_deref());
+                                if !settings.is_null() {
+                                    send_framed(
+                                        &out_for_init,
+                                        &json!({
+                                            "jsonrpc": "2.0",
+                                            "method": "workspace/didChangeConfiguration",
+                                            "params": { "settings": settings }
+                                        }),
+                                    );
+                                }
+
+                                let _ = event_tx.try_send(LspEvent::Initialized {
+                                    server: adapter.name.to_string(),
+                                });
 
                                 // Drain and send all pending did_open documents
                                 let pendings: Vec<_> = {
@@ -363,20 +645,8 @@ impl LspClient {
                                     let _ = tx.send(msg);
                                 }
                             }
-                            // A server-initiated request: we don't implement
-                            // any, so answer method-not-found so servers
-                            // don't wait forever.
-                            (Some(req_id), Some(_)) => {
-                                let err = json!({
-                                    "jsonrpc": "2.0",
-                                    "id": req_id,
-                                    "error": {
-                                        "code": -32601,
-                                        "message": "method not found"
-                                    }
-                                });
-                                send_framed(&out_for_init, &err);
-                            }
+                            // Requests are handled above.
+                            (Some(_), Some(_)) => {}
                             // A notification from the server.
                             (None, Some(_)) => {
                                 handle_incoming_message(&mut msg, &event_tx, &last_diag_r);
@@ -404,7 +674,7 @@ impl LspClient {
     }
 
     /// True once the initialize handshake finished and the process is alive.
-    fn is_ready(&self) -> bool {
+    pub fn is_ready(&self) -> bool {
         *self.is_initialized.lock().unwrap() && *self.is_alive.lock().unwrap()
     }
 
@@ -482,6 +752,40 @@ impl LspClient {
                 }),
                 ..Default::default()
             }),
+            // Workspace capabilities. `configuration: true` is what makes a
+            // server send `workspace/configuration` at all — without it the
+            // CSS/HTML/JSON/YAML/ESLint servers never ask for their settings,
+            // fall back to their built-in defaults (validation off) and
+            // publish nothing. Zed sets exactly these.
+            workspace: Some(lsp_types::WorkspaceClientCapabilities {
+                configuration: Some(true),
+                did_change_configuration: Some(
+                    lsp_types::DidChangeConfigurationClientCapabilities {
+                        dynamic_registration: Some(true),
+                    },
+                ),
+                did_change_watched_files: Some(
+                    lsp_types::DidChangeWatchedFilesClientCapabilities {
+                        dynamic_registration: Some(true),
+                        relative_pattern_support: Some(false),
+                    },
+                ),
+                workspace_folders: Some(true),
+                apply_edit: Some(true),
+                execute_command: Some(lsp_types::DynamicRegistrationClientCapabilities {
+                    dynamic_registration: Some(true),
+                }),
+                symbol: Some(lsp_types::WorkspaceSymbolClientCapabilities {
+                    dynamic_registration: Some(true),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            // Servers gate progress reporting on this.
+            window: Some(lsp_types::WindowClientCapabilities {
+                work_done_progress: Some(true),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         params.client_info = Some(lsp_types::ClientInfo {
@@ -489,15 +793,23 @@ impl LspClient {
             version: Some("0.1.0".into()),
         });
 
-        if self.lang == "typescript" || self.lang == "javascript" {
-            if let Some(ts_path) = find_tsserver_path() {
-                params.initialization_options = Some(json!({
-                    "tsserver": {
-                        "path": ts_path.to_string_lossy()
-                    }
-                }));
+        // Advertise the workspace folder too: ESLint and the JSON/YAML
+        // servers resolve config files and `node_modules` relative to it.
+        if let Some(root) = root_dir {
+            if let Some(uri) = path_to_uri(root) {
+                params.workspace_folders = Some(vec![lsp_types::WorkspaceFolder {
+                    uri,
+                    name: root
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                }]);
             }
         }
+
+        // Per-server options come from the adapter (Zed's
+        // `LspAdapter::initialization_options`).
+        params.initialization_options = self.adapter.initialization_options(root_dir);
 
         let init_req = json!({
             "jsonrpc": "2.0",
@@ -510,6 +822,11 @@ impl LspClient {
     }
 
     pub fn did_open(&self, path: &Path, lang: &str, text: &str) {
+        // Translate our editor language id into the id the *protocol*
+        // defines (Zed: `LspAdapter::language_ids`) — "tsx" becomes
+        // "typescriptreact", "bash" becomes "shellscript".
+        let language_id = self.adapter.language_id(lang).to_string();
+
         self.last_texts
             .lock()
             .unwrap()
@@ -520,7 +837,14 @@ impl LspClient {
             self.pending_opens
                 .lock()
                 .unwrap()
-                .push((path.to_path_buf(), lang.to_string(), text.to_string()));
+                .push((path.to_path_buf(), language_id, text.to_string()));
+            return;
+        }
+
+        // Re-opening a document the server already knows about is a protocol
+        // error; sync it instead.
+        if self.versions.lock().unwrap().contains_key(path) {
+            self.sync_document(path, text);
             return;
         }
 
@@ -532,7 +856,7 @@ impl LspClient {
         let params = DidOpenTextDocumentParams {
             text_document: TextDocumentItem {
                 uri,
-                language_id: lang.to_string(),
+                language_id,
                 version: 1,
                 text: text.to_string(),
             },
@@ -587,6 +911,30 @@ impl LspClient {
             "params": params
         });
 
+        self.send_payload(&msg);
+    }
+
+    /// `textDocument/didSave`. ESLint (`"run": "onType"` still re-lints on
+    /// save), gopls and rust-analyzer run their heavier checks here, so a
+    /// client that never sends it under-reports diagnostics.
+    pub fn did_save(&self, path: &Path, text: &str) {
+        if !self.is_ready() {
+            return;
+        }
+        // Flush pending edits first so the server's copy matches the file.
+        self.sync_document(path, text);
+
+        let Some(uri) = path_to_uri(path) else {
+            return;
+        };
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didSave",
+            "params": {
+                "textDocument": { "uri": uri },
+                "text": text,
+            }
+        });
         self.send_payload(&msg);
     }
 
@@ -1143,33 +1491,6 @@ pub fn paths_match(a: &Path, b: &Path) -> bool {
     }
 }
 
-pub fn find_tsserver_path() -> Option<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        let l = PathBuf::from(local);
-        candidates.push(l.join(r"Zed\languages\vtsls\node_modules\typescript\lib\tsserver.js"));
-        candidates.push(l.join(r"Zed\languages\json-language-server\node_modules\typescript\lib\tsserver.js"));
-        candidates.push(l.join(r"Zed\languages\vscode-css-language-server\node_modules\typescript\lib\tsserver.js"));
-        candidates.push(l.join(r"Programs\Microsoft VS Code\resources\app\extensions\node_modules\typescript\lib\tsserver.js"));
-    }
-    if let Some(appdata) = std::env::var_os("APPDATA") {
-        let a = PathBuf::from(appdata);
-        candidates.push(a.join(r"npm\node_modules\typescript\lib\tsserver.js"));
-    }
-    if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
-        let h = PathBuf::from(home);
-        candidates.push(h.join(".local/share/zed/languages/vtsls/node_modules/typescript/lib/tsserver.js"));
-        candidates.push(h.join(".vscode/extensions/node_modules/typescript/lib/tsserver.js"));
-    }
-
-    for c in candidates {
-        if c.is_file() {
-            return Some(c);
-        }
-    }
-    None
-}
-
 pub fn find_binary_on_path(binary: &str) -> Option<PathBuf> {
     const WINDOWS_EXTS: [&str; 3] = [".cmd", ".exe", ".bat"];
     let candidates: Vec<String> = if cfg!(windows) && !WINDOWS_EXTS.iter().any(|e| binary.ends_with(e)) {
@@ -1222,6 +1543,82 @@ fn read_message<R: BufRead>(reader: &mut R) -> std::io::Result<Option<Value>> {
 
     let val = serde_json::from_slice(&body).ok();
     Ok(val)
+}
+
+/// Answer a server-initiated request.
+///
+/// Zed registers handlers for these on every server it starts
+/// (`crates/project/src/lsp_store.rs`). Answering them is not optional:
+///
+/// * **`workspace/configuration`** — the VS Code-derived servers (CSS, HTML,
+///   JSON, YAML, ESLint) ask for their settings immediately after
+///   `initialized` and **publish no diagnostics until they get a reply**.
+///   Replying "method not found" is the single most common reason a
+///   hand-rolled client shows errors for TypeScript but stays silent for CSS
+///   and HTML.
+/// * **`client/registerCapability`** — servers register dynamic capabilities
+///   here (tsserver registers most of its features this way). It must be
+///   acknowledged or the server may never finish starting.
+/// * **`window/workDoneProgress/create`** — must be acknowledged before the
+///   server will emit progress notifications.
+/// * **`workspace/applyEdit`** — must be answered so the server doesn't block
+///   after a rename/quick-fix; we report `applied: false` because applying a
+///   multi-file edit needs the buffer store.
+///
+/// Anything genuinely unknown still gets `-32601`, per the spec.
+fn handle_server_request(
+    adapter: &'static super::adapter::ServerAdapter,
+    root: Option<&Path>,
+    id: Value,
+    method: &str,
+    params: Option<&Value>,
+    out: &mpsc::Sender<Vec<u8>>,
+) {
+    let result: Option<Value> = match method {
+        "workspace/configuration" => {
+            // Reply with one settings object per requested item, in order.
+            let items = params
+                .and_then(|p| p.get("items"))
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let configs: Vec<Value> = if items.is_empty() {
+                vec![adapter.workspace_configuration("", root)]
+            } else {
+                items
+                    .iter()
+                    .map(|item| {
+                        let section = item
+                            .get("section")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        adapter.workspace_configuration(section, root)
+                    })
+                    .collect()
+            };
+            Some(Value::Array(configs))
+        }
+        // Acknowledge with a null result.
+        "client/registerCapability"
+        | "client/unregisterCapability"
+        | "window/workDoneProgress/create" => Some(Value::Null),
+        "workspace/applyEdit" => Some(json!({ "applied": false })),
+        "workspace/semanticTokens/refresh"
+        | "workspace/inlayHint/refresh"
+        | "workspace/codeLens/refresh"
+        | "workspace/diagnostic/refresh" => Some(Value::Null),
+        _ => None,
+    };
+
+    let response = match result {
+        Some(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+        None => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": { "code": -32601, "message": format!("method not found: {method}") }
+        }),
+    };
+    send_framed(out, &response);
 }
 
 fn handle_incoming_message(
@@ -1298,35 +1695,143 @@ mod tests {
         assert!(!is_completion_trigger_char(';'));
     }
 
-    #[test]
-    fn test_live_typescript_diagnostics() {
-        if find_binary_on_path("typescript-language-server").is_none() {
-            println!("typescript-language-server not found, skipping");
-            return;
+    /// Collect the framed messages a `handle_server_request` call produced.
+    fn drain(rx: &mpsc::Receiver<Vec<u8>>) -> Vec<Value> {
+        let mut out = Vec::new();
+        while let Ok(bytes) = rx.try_recv() {
+            let text = String::from_utf8_lossy(&bytes);
+            if let Some(idx) = text.find("\r\n\r\n") {
+                if let Ok(v) = serde_json::from_str::<Value>(&text[idx + 4..]) {
+                    out.push(v);
+                }
+            }
         }
+        out
+    }
+
+    /// The regression this whole change exists to prevent: replying
+    /// "method not found" to `workspace/configuration` makes the CSS, HTML,
+    /// JSON, YAML and ESLint servers publish nothing at all.
+    #[test]
+    fn workspace_configuration_is_answered_per_item() {
+        let css = super::super::adapter::adapter_by_name("vscode-css-language-server").unwrap();
+        let (tx, rx) = mpsc::channel();
+
+        handle_server_request(
+            css,
+            None,
+            json!(7),
+            "workspace/configuration",
+            Some(&json!({ "items": [{ "section": "css" }, { "section": "scss" }] })),
+            &tx,
+        );
+
+        let sent = drain(&rx);
+        assert_eq!(sent.len(), 1);
+        let reply = &sent[0];
+        assert_eq!(reply["id"], 7);
+        assert!(reply.get("error").is_none(), "must not be an error reply");
+
+        // One config per requested item, in order, with validation enabled.
+        let result = reply["result"].as_array().expect("array result");
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0]["validate"], true);
+        assert_eq!(result[1]["validate"], true);
+    }
+
+    /// Request ids may be strings; the reply must echo the id unchanged.
+    #[test]
+    fn string_request_ids_are_echoed_verbatim() {
+        let ts = super::super::adapter::adapter_by_name("typescript-language-server").unwrap();
+        let (tx, rx) = mpsc::channel();
+
+        handle_server_request(
+            ts,
+            None,
+            json!("req-abc"),
+            "client/registerCapability",
+            Some(&json!({ "registrations": [] })),
+            &tx,
+        );
+
+        let sent = drain(&rx);
+        assert_eq!(sent[0]["id"], "req-abc");
+        assert!(sent[0].get("error").is_none());
+        assert!(sent[0]["result"].is_null());
+    }
+
+    /// Genuinely unknown methods still get a spec-compliant error, so a
+    /// server never blocks waiting on us.
+    #[test]
+    fn unknown_server_requests_get_method_not_found() {
+        let ts = super::super::adapter::adapter_by_name("typescript-language-server").unwrap();
+        let (tx, rx) = mpsc::channel();
+        handle_server_request(ts, None, json!(3), "some/unknownMethod", None, &tx);
+        let sent = drain(&rx);
+        assert_eq!(sent[0]["error"]["code"], -32601);
+    }
+
+    /// Frames must be byte-length prefixed, not char-length — a diagnostic
+    /// containing non-ASCII would otherwise desynchronise the stream.
+    #[test]
+    fn framing_uses_byte_length_for_non_ascii() {
+        let msg = json!({ "jsonrpc": "2.0", "method": "note", "params": { "s": "héllo — ✓" } });
+        let bytes = frame_payload(&msg).unwrap();
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        let header_end = text.find("\r\n\r\n").unwrap();
+        let declared: usize = text[..header_end]
+            .trim_start_matches("Content-Length:")
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(declared, bytes.len() - (header_end + 4));
+
+        // And it round-trips through the reader.
+        let mut cursor = std::io::Cursor::new(bytes);
+        let back = read_message(&mut cursor).unwrap().unwrap();
+        assert_eq!(back["params"]["s"], "héllo — ✓");
+    }
+
+    /// End-to-end against the real server. Skipped unless it is installed,
+    /// so CI without Node still passes.
+    #[test]
+    fn live_typescript_diagnostics() {
+        let adapter =
+            super::super::adapter::adapter_by_name("typescript-language-server").unwrap();
+        let super::super::adapter::Source::Npm { entry, .. } = adapter.source else {
+            panic!("typescript-language-server should be an npm server");
+        };
+        let resolved = super::super::node::resolve_npm_server(adapter.name, entry, adapter.args);
+        let super::super::node::Resolved::Ready { .. } = resolved else {
+            eprintln!("typescript-language-server not installed; skipping live test");
+            return;
+        };
+
+        let dir = std::env::temp_dir().join(format!("olova-lsp-live-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("bad.ts");
+        let code = "function f(x: number): string { return x; }\n";
+        std::fs::write(&file, code).unwrap();
 
         let mut mgr = LspManager::new();
         let rx = mgr.event_receiver();
-        let test_file = std::env::temp_dir().join("olova_test_bad.ts");
-        let bad_code = "function test(x: number): string { return x; }";
+        let client = mgr
+            .ensure_server("typescript", Some(&dir))
+            .expect("server should start");
+        client.did_open(&file, "typescript", code);
 
-        if let Some(client) = mgr.ensure_server("typescript", None) {
-            client.did_open(&test_file, "typescript", bad_code);
-        }
-
-        // Wait up to 5 seconds for diagnostics
         let start = std::time::Instant::now();
-        let mut got_diagnostics = false;
-        while start.elapsed() < std::time::Duration::from_secs(5) {
+        let mut got = false;
+        while start.elapsed() < Duration::from_secs(30) {
             if let Ok(LspEvent::Diagnostics { path, diagnostics }) = rx.try_recv() {
-                println!("Received diagnostics for {}: {:?}", path.display(), diagnostics);
-                if paths_match(&path, &test_file) && !diagnostics.is_empty() {
-                    got_diagnostics = true;
+                if paths_match(&path, &file) && !diagnostics.is_empty() {
+                    got = true;
                     break;
                 }
             }
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            std::thread::sleep(Duration::from_millis(50));
         }
-        println!("Live LSP test got_diagnostics: {got_diagnostics}");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(got, "expected diagnostics for a deliberate type error");
     }
 }
