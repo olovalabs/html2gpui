@@ -145,6 +145,7 @@ impl LspManager {
         }
     }
 
+    #[allow(dead_code)]
     pub fn root(&self) -> Option<&Path> {
         self.root.as_deref()
     }
@@ -359,6 +360,7 @@ pub struct LspClient {
     /// The adapter that configures this server (Zed's `LspAdapter`).
     pub adapter: &'static super::adapter::ServerAdapter,
     /// Workspace root this server was started in.
+    #[allow(dead_code)]
     pub root: Option<PathBuf>,
     /// Outbound framed messages, drained by a dedicated writer thread so a
     /// slow language server (full stdin pipe) can never stall the UI thread.

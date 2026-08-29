@@ -31,7 +31,4 @@ pub mod adapter;
 pub mod client;
 pub mod node;
 
-pub use client::{
-    attach_lsp_providers, path_to_uri, paths_match, uri_to_path, LspClient, LspEvent, LspManager,
-    ServerStatus,
-};
+pub use client::{attach_lsp_providers, paths_match, LspEvent, LspManager, ServerStatus};

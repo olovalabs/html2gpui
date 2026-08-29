@@ -62,6 +62,7 @@ pub struct ServerAdapter {
 
 impl ServerAdapter {
     /// The npm package this adapter installs, if any.
+    #[allow(dead_code)]
     pub fn npm_package(&self) -> Option<&'static str> {
         match self.source {
             Source::Npm { package, .. } => Some(package),

@@ -130,6 +130,7 @@ fn shebang_language(path: &Path) -> Option<&'static str> {
 /// The authoritative table lives in [`crate::lsp::adapter::ADAPTERS`], which
 /// also knows how to install and configure each server (Zed keeps the same
 /// information in one `LspAdapter` per server rather than in a name map).
+#[allow(dead_code)]
 pub fn lsp_server_for(lang: &str) -> Option<&'static str> {
     crate::lsp::adapter::adapter_for_language(lang).map(|a| a.name)
 }
