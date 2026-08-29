@@ -107,6 +107,10 @@ pub(crate) struct Workspace {
     /// Currently selected path in the explorer.
     pub(crate) selected_path: Option<PathBuf>,
     pub(crate) explorer_section_expanded: bool,
+    pub(crate) git_repo_section_expanded: bool,
+    pub(crate) git_staged_expanded: bool,
+    pub(crate) git_changes_expanded: bool,
+    pub(crate) split_diff: bool,
     pub(crate) inline_creating: Option<InlineCreating>,
     /// A file to open once the next render cycle runs.
     pub(crate) pending_open: Option<PathBuf>,
@@ -365,6 +369,10 @@ impl Workspace {
             root_display_shared: SharedString::new_static(""),
             selected_path: None,
             explorer_section_expanded: true,
+            git_repo_section_expanded: true,
+            git_staged_expanded: true,
+            git_changes_expanded: true,
+            split_diff: true,
             inline_creating: None,
             pending_open: None,
             status: "Welcome — open a folder or create a file to begin".into(),
@@ -1990,6 +1998,56 @@ impl Workspace {
         .detach();
     }
 
+    pub(crate) fn toggle_git_repo_section(&mut self, cx: &mut Context<Self>) {
+        self.git_repo_section_expanded = !self.git_repo_section_expanded;
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_git_staged_section(&mut self, cx: &mut Context<Self>) {
+        self.git_staged_expanded = !self.git_staged_expanded;
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_git_changes_section(&mut self, cx: &mut Context<Self>) {
+        self.git_changes_expanded = !self.git_changes_expanded;
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_split_diff(&mut self, cx: &mut Context<Self>) {
+        self.split_diff = !self.split_diff;
+        cx.notify();
+    }
+
+    pub(crate) fn generate_commit_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let msg = if let Some(repo) = &self.git {
+            let changed_files: Vec<_> = repo
+                .changes
+                .iter()
+                .map(|c| {
+                    std::path::Path::new(&c.rel)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| c.rel.clone())
+                })
+                .collect();
+            if changed_files.is_empty() {
+                "refactor: update source control".to_string()
+            } else if changed_files.len() == 1 {
+                format!("Update {}", changed_files[0])
+            } else {
+                format!("Update {} and {}", changed_files[0], changed_files[1])
+            }
+        } else {
+            "chore: update workspace".to_string()
+        };
+
+        if let Some(input) = &self.git_commit_input {
+            let _ = input.update(cx, |state, cx| {
+                state.set_value(&msg, window, cx);
+            });
+        }
+    }
+
     /// The commit-message input of the source-control panel. Created once on
     /// first use; Enter (or the Commit button) commits the staged changes.
     pub(crate) fn ensure_git_commit_input(
@@ -1997,12 +2055,18 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<InputState> {
+        let branch = self
+            .git
+            .as_ref()
+            .and_then(|g| g.branch.as_deref())
+            .unwrap_or("main");
+        let placeholder_text = format!("Message (Ctrl+Enter to commit on \"{branch}\"...)");
         if let Some(input) = &self.git_commit_input {
             return input.clone();
         }
         let input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Message (Ctrl+Enter to commit)")
+                .placeholder(placeholder_text)
         });
         // Enter in the commit box commits. The subscribe callback has no
         // window handle, so it only flags the request; render() (which does

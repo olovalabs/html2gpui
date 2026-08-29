@@ -1,9 +1,15 @@
-//! Source Control panel — real Git integration.
+//! Source Control panel — 100% authentic VS Code Git UI.
 //!
-//! Shows the actual `git status` of the opened repository: a commit box on
-//! top, then STAGED CHANGES and CHANGES lists (only the files that changed,
-//! with VS Code-style status letters). Clicking a file opens its diff in the
-//! editor; the context menu stages / unstages / discards / opens files.
+//! Shows the actual `git status` of the opened repository:
+//! - "Source Control" header with `...` action menu
+//! - Collapsible "Changes" repository root section
+//! - Commit input with `Generate ✨` and `Message (Ctrl+Enter to commit on "main"...)`
+//! - Split blue `✓ Commit | ⌵` button
+//! - Collapsible `Staged Changes` section with blue badge count and official file icons
+//! - Collapsible `Changes` section with blue badge count and official file icons
+//! - File rows showing: File Icon, File Name, Subpath in muted text, and status letter (M, U, A, D)
+
+use std::path::Path;
 
 use gpui::{
     div, prelude::*, px, rgba, svg, AnyElement, Context, ElementId, Entity, FontWeight,
@@ -17,16 +23,17 @@ use gpui_component::{
 
 use crate::actions::{
     ExplorerCopyPath, ExplorerRevealInFinder, GitDiscardAll, GitDiscardFile, GitOpenDiff,
-    GitOpenFile, GitRefresh, GitStageAll, GitStageFile, GitUnstageFile, GitUnstageAll,
+    GitOpenFile, GitRefresh, GitStageAll, GitStageFile, GitUnstageAll, GitUnstageFile,
 };
+use crate::file_icons;
 use crate::git::{ChangeKind, GitChange, RepoStatus};
 use crate::theme::Colors;
-use crate::ui::common::section_strip;
+use crate::ui::common::icon_img;
 use crate::workspace::Workspace;
 
 const ROW_HEIGHT: f32 = 24.0;
 
-/// VS Code-style color for a change kind.
+/// VS Code color for a change kind.
 fn kind_color(kind: ChangeKind, t: &Colors) -> u32 {
     match kind {
         ChangeKind::Modified => t.vc_modified,
@@ -41,13 +48,16 @@ fn kind_color(kind: ChangeKind, t: &Colors) -> u32 {
 pub(crate) fn render_git_panel(
     commit_input: Option<&Entity<InputState>>,
     repo: Option<&RepoStatus>,
+    repo_section_expanded: bool,
+    staged_expanded: bool,
+    changes_expanded: bool,
     t: &Colors,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     let branch = repo
         .and_then(|r| r.branch.clone())
-        .unwrap_or_else(|| "NO REPOSITORY".to_string());
+        .unwrap_or_else(|| "main".to_string());
 
     let mut col = div()
         .size_full()
@@ -58,7 +68,7 @@ pub(crate) fn render_git_panel(
         .border_color(rgba(t.border_variant))
         .overflow_hidden();
 
-    col = col.child(header(&branch, t, window, cx));
+    col = col.child(header(t, window, cx));
 
     match repo {
         None => {
@@ -77,27 +87,192 @@ pub(crate) fn render_git_panel(
                 .cloned()
                 .collect();
 
-            col = col.child(commit_box(commit_input, t, cx));
-            col = col.child(
-                section_strip(&format!("STAGED CHANGES ({})", staged.len()), t),
-            );
-            col = col.child(
-                div()
+            // Top "Changes" collapsible section containing Commit Input & Commit button
+            let repo_chevron = if repo_section_expanded {
+                "ui_icons/chevron-down_tint.svg"
+            } else {
+                "ui_icons/chevron-right_tint.svg"
+            };
+
+            let repo_section_header = div()
+                .id("git-repo-header")
+                .h(px(24.0))
+                .px(px(8.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(4.0))
+                .cursor_pointer()
+                .hover(|s| s.bg(rgba(t.ghost_hover)))
+                .child(
+                    svg()
+                        .path(repo_chevron)
+                        .w(px(14.0))
+                        .h(px(14.0))
+                        .text_color(rgba(t.icon_muted)),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgba(t.text))
+                        .child(SharedString::from("Changes")),
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.toggle_git_repo_section(cx);
+                }));
+
+            col = col.child(repo_section_header);
+
+            if repo_section_expanded {
+                col = col.child(commit_box(commit_input, &branch, t, window, cx));
+            }
+
+            // Staged Changes section
+            if !staged.is_empty() || repo_section_expanded {
+                let staged_chevron = if staged_expanded {
+                    "ui_icons/chevron-down_tint.svg"
+                } else {
+                    "ui_icons/chevron-right_tint.svg"
+                };
+
+                let staged_header = div()
+                    .id("git-staged-header")
+                    .group("git-staged-header")
+                    .h(px(22.0))
+                    .px(px(8.0))
                     .flex()
-                    .flex_col()
-                    .children(staged.iter().map(|c| {
-                        change_row(c, true, "git-staged-row", t, cx)
-                    })),
-            );
-            col = col.child(section_strip(&format!("CHANGES ({})", unstaged.len()), t));
-            col = col.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .children(unstaged.iter().map(|c| {
-                        change_row(c, false, "git-change-row", t, cx)
-                    })),
-            );
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgba(t.ghost_hover)))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(4.0))
+                            .child(
+                                svg()
+                                    .path(staged_chevron)
+                                    .w(px(14.0))
+                                    .h(px(14.0))
+                                    .text_color(rgba(t.icon_muted)),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgba(t.text))
+                                    .child(SharedString::from("Staged Changes")),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(4.0))
+                            .child(
+                                section_action("-", "Unstage All", GitUnstageAll, t, window, cx)
+                                    .invisible()
+                                    .group_hover("git-staged-header", |s| s.visible()),
+                            )
+                            .child(badge(staged.len())),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.toggle_git_staged_section(cx);
+                    }));
+
+                col = col.child(staged_header);
+
+                if staged_expanded {
+                    col = col.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .children(staged.iter().map(|c| {
+                                change_row(c, true, "git-staged-row", t, cx)
+                            })),
+                    );
+                }
+            }
+
+            // Changes section
+            let changes_chevron = if changes_expanded {
+                "ui_icons/chevron-down_tint.svg"
+            } else {
+                "ui_icons/chevron-right_tint.svg"
+            };
+
+            let changes_header = div()
+                .id("git-changes-header")
+                .group("git-changes-header")
+                .h(px(22.0))
+                .px(px(8.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .cursor_pointer()
+                .hover(|s| s.bg(rgba(t.ghost_hover)))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(4.0))
+                        .child(
+                            svg()
+                                .path(changes_chevron)
+                                .w(px(14.0))
+                                .h(px(14.0))
+                                .text_color(rgba(t.icon_muted)),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgba(t.text))
+                                .child(SharedString::from("Changes")),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(4.0))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(2.0))
+                                .invisible()
+                                .group_hover("git-changes-header", |s| s.visible())
+                                .child(section_action("+", "Stage All", GitStageAll, t, window, cx))
+                                .child(section_action("↺", "Discard All", GitDiscardAll, t, window, cx)),
+                        )
+                        .child(badge(unstaged.len())),
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.toggle_git_changes_section(cx);
+                }));
+
+            col = col.child(changes_header);
+
+            if changes_expanded {
+                col = col.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .children(unstaged.iter().map(|c| {
+                            change_row(c, false, "git-change-row", t, cx)
+                        })),
+                );
+            }
 
             if staged.is_empty() && unstaged.is_empty() {
                 col = col.child(empty_state(
@@ -111,12 +286,11 @@ pub(crate) fn render_git_panel(
     col.into_any_element()
 }
 
-/// Panel header: label + branch + refresh / stage-all / unstage-all buttons.
+/// Panel header: "Source Control" + "..." action menu.
 fn header(
-    branch: &str,
     t: &Colors,
-    window: &mut Window,
-    cx: &mut Context<Workspace>,
+    _window: &mut Window,
+    _cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
     div()
         .h(px(35.0))
@@ -126,124 +300,237 @@ fn header(
         .justify_between()
         .child(
             div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(6.0))
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(rgba(t.text_muted))
-                        .child(SharedString::from("SOURCE CONTROL")),
-                )
-                .child(
-                    div()
-                        .text_size(px(10.5))
-                        .text_color(rgba(t.text_accent))
-                        .child(SharedString::from(branch.to_string())),
-                ),
+                .text_size(px(11.0))
+                .font_weight(FontWeight::BOLD)
+                .text_color(rgba(t.text_muted))
+                .child(SharedString::from("Source Control")),
         )
         .child(
             div()
+                .id("git-header-more")
+                .size(px(22.0))
+                .rounded(px(4.0))
                 .flex()
-                .flex_row()
                 .items_center()
-                .gap(px(2.0))
-                .child(header_button("Refresh", "ui_icons/refresh_tint.svg", GitRefresh, t, window, cx))
-                .child(header_button("Stage all", "ui_icons/chevron-down_tint.svg", GitStageAll, t, window, cx))
-                .child(header_button("Unstage all", "ui_icons/chevron-up_tint.svg", GitUnstageAll, t, window, cx))
-                .child(header_button("Discard all", "ui_icons/ellipsis_tint.svg", GitDiscardAll, t, window, cx)),
+                .justify_center()
+                .cursor_pointer()
+                .hover(|s| s.bg(rgba(t.ghost_hover)))
+                .child(
+                    svg()
+                        .path("ui_icons/ellipsis_tint.svg")
+                        .w(px(14.0))
+                        .h(px(14.0))
+                        .text_color(rgba(t.icon_muted)),
+                )
+                .context_menu(|menu, _window, _cx| {
+                    menu.menu("Refresh", Box::new(GitRefresh))
+                        .menu("Stage All Changes", Box::new(GitStageAll))
+                        .menu("Unstage All Changes", Box::new(GitUnstageAll))
+                        .menu("Discard All Changes", Box::new(GitDiscardAll))
+                }),
         )
 }
 
-fn header_button(
+fn section_action(
+    label: &'static str,
     tooltip: &'static str,
-    icon: &'static str,
     action: impl gpui::Action + 'static,
     t: &Colors,
     _window: &mut Window,
     cx: &mut Context<Workspace>,
-) -> impl IntoElement {
+) -> gpui::Stateful<gpui::Div> {
     let _ = tooltip;
     div()
-        .id(SharedString::from(format!("git-header-{icon}")))
-        .size(px(22.0))
-        .rounded(px(4.0))
+        .id(SharedString::from(format!("git-sec-action-{label}")))
+        .size(px(18.0))
+        .rounded(px(3.0))
         .flex()
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .hover(|s| s.bg(rgba(t.ghost_hover)))
-        .child(
-            svg()
-                .path(icon)
-                .w(px(14.0))
-                .h(px(14.0))
-                .text_color(rgba(t.icon_muted)),
-        )
+        .text_size(px(12.0))
+        .text_color(rgba(t.text_muted))
+        .hover(|s| s.bg(rgba(t.element_hover)).text_color(rgba(t.text)))
+        .child(SharedString::from(label))
         .on_click(cx.listener(move |_this, _, window, cx| {
             window.dispatch_action(action.boxed_clone(), cx);
         }))
 }
 
-/// Commit message box + Commit button.
+/// Blue pill badge for change count.
+fn badge(count: usize) -> impl IntoElement {
+    div()
+        .min_w(px(16.0))
+        .h(px(16.0))
+        .px(px(5.0))
+        .rounded_full()
+        .bg(rgba(0x0078d4ff))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(11.0))
+        .font_weight(FontWeight::BOLD)
+        .text_color(rgba(0xffffffff))
+        .child(SharedString::from(count.to_string()))
+}
+
+/// Commit message box with "Generate ✨" button + Split Commit button.
 fn commit_box(
     input: Option<&Entity<InputState>>,
+    branch: &str,
     t: &Colors,
+    _window: &mut Window,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
+    let placeholder_text = format!("Message (Ctrl+Enter to commit on \"{branch}\"...)");
+
     let input_field = match input {
         Some(input) => div()
             .h(px(30.0))
             .px(px(8.0))
             .flex()
+            .flex_row()
             .items_center()
+            .justify_between()
             .bg(rgba(t.element_bg))
             .border_1()
             .border_color(rgba(t.border))
-            .rounded(px(4.0))
+            .rounded(px(3.0))
             .child(
-                Input::new(input)
-                    .xsmall()
-                    .text_size(px(12.5))
-                    .appearance(false)
-                    .bordered(false),
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .child(
+                        Input::new(input)
+                            .xsmall()
+                            .text_size(px(12.5))
+                            .appearance(false)
+                            .bordered(false),
+                    ),
+            )
+            .child(
+                div()
+                    .id("git-generate-btn")
+                    .h(px(20.0))
+                    .px(px(6.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(2.0))
+                    .bg(rgba(0x0078d4ff))
+                    .hover(|s| s.bg(rgba(0x0086e6ff)))
+                    .rounded(px(2.0))
+                    .cursor_pointer()
+                    .text_size(px(11.0))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgba(0xffffffff))
+                    .child(SharedString::from("Generate ✨"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.generate_commit_message(window, cx);
+                    })),
             )
             .into_any_element(),
-        None => crate::ui::common::mock_input("Message (Ctrl+Enter to commit)", 30.0, t)
+        None => div()
+            .h(px(30.0))
+            .px(px(8.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .bg(rgba(t.element_bg))
+            .border_1()
+            .border_color(rgba(t.border))
+            .rounded(px(3.0))
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgba(t.text_muted))
+                    .child(SharedString::from(placeholder_text)),
+            )
+            .child(
+                div()
+                    .h(px(20.0))
+                    .px(px(6.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(rgba(0x0078d4ff))
+                    .rounded(px(2.0))
+                    .text_size(px(11.0))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgba(0xffffffff))
+                    .child(SharedString::from("Generate ✨")),
+            )
             .into_any_element(),
     };
 
-    div()
-        .px(px(12.0))
-        .py(px(8.0))
+    // Split Commit Button: [ ✓ Commit | ⌵ ]
+    let commit_split_btn = div()
+        .h(px(28.0))
+        .rounded(px(3.0))
+        .bg(rgba(0x0078d4ff))
         .flex()
-        .flex_col()
-        .gap(px(8.0))
-        .child(input_field)
+        .flex_row()
+        .items_center()
+        .overflow_hidden()
         .child(
             div()
                 .id("git-commit-btn")
-                .h(px(26.0))
+                .flex_1()
+                .h_full()
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(rgba(t.border_focused))
-                .hover(|s| s.bg(rgba(t.icon_accent)))
-                .rounded(px(4.0))
                 .cursor_pointer()
+                .hover(|s| s.bg(rgba(0x0086e6ff)))
                 .text_size(px(12.0))
-                .text_color(rgba(t.background))
+                .font_weight(FontWeight::BOLD)
+                .text_color(rgba(0xffffffff))
                 .child(SharedString::from("✓ Commit"))
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.git_commit(window, cx);
                 })),
         )
+        .child(
+            div()
+                .w(px(1.0))
+                .h(px(18.0))
+                .bg(rgba(0xffffff33)),
+        )
+        .child(
+            div()
+                .id("git-commit-dropdown-btn")
+                .w(px(26.0))
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|s| s.bg(rgba(0x0086e6ff)))
+                .child(
+                    svg()
+                        .path("ui_icons/chevron-down_tint.svg")
+                        .w(px(14.0))
+                        .h(px(14.0))
+                        .text_color(rgba(0xffffffff)),
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.git_commit(window, cx);
+                })),
+        );
+
+    div()
+        .px(px(12.0))
+        .pt(px(2.0))
+        .pb(px(8.0))
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .child(input_field)
+        .child(commit_split_btn)
 }
 
-/// One changed file row. `staged_section` selects the letter/actions shown;
-/// `id_prefix` keeps element ids unique when a file appears in both sections.
+/// One changed file row. `staged_section` selects the letter/actions shown.
 fn change_row(
     change: &GitChange,
     staged_section: bool,
@@ -265,11 +552,21 @@ fn change_row(
     };
     let color = kind_color(kind, t);
 
-    let name = change
-        .path
+    let rel_path = Path::new(&change.rel);
+    let name = rel_path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| change.rel.trim_end_matches('/').to_string());
+
+    let parent_dir = rel_path.parent().and_then(|p| {
+        let s = p.to_string_lossy();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s.replace('/', "\\"))
+        }
+    });
+
     let old_name = change
         .old_rel
         .as_ref()
@@ -277,13 +574,15 @@ fn change_row(
         .map(|s| s.to_string());
 
     let path = change.path.clone();
+    let file_icon_path = file_icons::icon_for(rel_path);
 
     let mut row = div()
         .id((ElementId::from(id_prefix), change.rel.clone()))
         .group("git-row")
         .w_full()
         .h(px(ROW_HEIGHT))
-        .px(px(12.0))
+        .pl(px(20.0))
+        .pr(px(12.0))
         .flex()
         .flex_row()
         .items_center()
@@ -297,16 +596,10 @@ fn change_row(
             }
         }));
 
-    row = row.child(
-        div()
-            .w(px(14.0))
-            .flex_none()
-            .text_size(px(11.0))
-            .font_weight(FontWeight::BOLD)
-            .text_color(rgba(color))
-            .child(SharedString::from(letter)),
-    );
+    // Official File Type Icon
+    row = row.child(icon_img(file_icon_path, 16.0));
 
+    // File name and folder subpath
     row = row.child(
         div()
             .flex_1()
@@ -314,7 +607,7 @@ fn change_row(
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(4.0))
+            .gap(px(6.0))
             .child(
                 div()
                     .min_w(px(0.0))
@@ -325,6 +618,15 @@ fn change_row(
                     .text_color(rgba(t.text))
                     .child(SharedString::from(name)),
             )
+            .when_some(parent_dir, |d, parent| {
+                d.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(11.5))
+                        .text_color(rgba(t.text_muted))
+                        .child(SharedString::from(parent)),
+                )
+            })
             .when_some(old_name, |d, old| {
                 d.child(
                     div()
@@ -343,7 +645,7 @@ fn change_row(
     let path_c = path.clone();
     if staged_section {
         row = row.child(
-            row_action("-", "unstage", t, cx)
+            row_action("-", "Unstage", t, cx)
                 .invisible()
                 .group_hover("git-row", |s| s.visible())
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -352,7 +654,7 @@ fn change_row(
         );
     } else {
         row = row.child(
-            row_action("+", "stage", t, cx)
+            row_action("+", "Stage", t, cx)
                 .invisible()
                 .group_hover("git-row", |s| s.visible())
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -360,7 +662,7 @@ fn change_row(
                 })),
         );
         row = row.child(
-            row_action("↺", "discard", t, cx)
+            row_action("↺", "Discard", t, cx)
                 .invisible()
                 .group_hover("git-row", |s| s.visible())
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -368,6 +670,20 @@ fn change_row(
                 })),
         );
     }
+
+    // Status letter on far right (e.g. M, U, A, D)
+    row = row.child(
+        div()
+            .w(px(14.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(px(11.5))
+            .font_weight(FontWeight::BOLD)
+            .text_color(rgba(color))
+            .child(SharedString::from(letter)),
+    );
 
     // Context menu: open / diff / stage / discard / copy.
     let path_c1 = change.path.clone();
@@ -410,7 +726,7 @@ fn row_action(
     div()
         .id(SharedString::from(format!("git-action-{label}")))
         .size(px(18.0))
-        .rounded(px(4.0))
+        .rounded(px(3.0))
         .flex_none()
         .flex()
         .items_center()

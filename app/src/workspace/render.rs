@@ -89,6 +89,10 @@ impl Render for Workspace {
         let git_repo = self.git.as_ref();
         let git_changes = git_repo.map(|g| g.change_count()).unwrap_or(0);
         let git_branch = git_repo.and_then(|g| g.branch.clone());
+        let git_repo_section_expanded = self.git_repo_section_expanded;
+        let git_staged_expanded = self.git_staged_expanded;
+        let git_changes_expanded = self.git_changes_expanded;
+        let split_diff = self.split_diff;
         let git_commit_input = self.git_commit_input.clone();
         // Active file language + LSP readiness for the status bar.
         let lang_label = open.and_then(|p| lang::language_for(p));
@@ -301,6 +305,9 @@ impl Render for Workspace {
                                     Activity::Git => ui::sidebar::git::render_git_panel(
                                         git_commit_input.as_ref(),
                                         git_repo,
+                                        git_repo_section_expanded,
+                                        git_staged_expanded,
+                                        git_changes_expanded,
                                         &t,
                                         window,
                                         cx,
@@ -340,7 +347,7 @@ impl Render for Workspace {
                                             d.child(ui::settings::render_settings(&self.settings, &t, theme_ix, font_size, cx))
                                         } else if let Some(diff) = active_diff {
                                             d.child(ui::diff::render_diff_view(
-                                                diff, font_size, &t, cx,
+                                                diff, font_size, split_diff, &t, cx,
                                             ))
                                         } else if let Some(editor) = editor {
                                             d.child(
