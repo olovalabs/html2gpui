@@ -90,6 +90,20 @@ Zed's approach); the widget library is then pointed at them
 (`mono_font_family = Lilex` for the editor, `font_family = IBM Plex Sans`
 for UI) and re-applied after every theme switch.
 
+## Explorer performance and navigation
+
+The file tree follows the same shape as Zed's project panel: directory levels
+are lazy-loaded, visible rows are cached in a flat snapshot, and GPUI's
+`uniform_list` only lays out rows inside the viewport. Refreshes and filesystem
+notifications merge one affected directory level; they do not recursively
+rescan every expanded folder or block the UI while reading disk. Empty folders
+are cached correctly, so repeatedly opening them does not trigger another scan.
+
+The explorer also supports auto-reveal for opened files, arrow-key navigation
+(Up/Down/Home/End), Left/Right folder navigation, Enter to open/toggle, and
+quick New File, New Folder, Refresh, and Collapse All actions in the project
+header. Right-click rows for the full file-operation menu.
+
 ## File icons
 
 Explorer icons come from Zed's default icon theme — SVGs in

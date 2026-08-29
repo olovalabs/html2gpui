@@ -13,7 +13,7 @@ compiled** here — run `cargo build` / `cargo clippy` before shipping.
 | # | Severity | Status | Issue |
 |---|----------|--------|-------|
 | 1 | 🔴 Critical | ✅ Fixed | O(n·log n) `stat()` syscalls + per-comparison allocs in `load_dir` sort |
-| 2 | 🔴 High | 🟡 Partly fixed | Explorer tree rebuilt every frame (no virtualization) |
+| 2 | 🔴 High | ✅ Fixed | Explorer tree rebuilt every frame (no virtualization) |
 | 3 | 🔴 High | 🟡 Partly fixed | Whole-file LSP `didChange` per keystroke + blocking writes on UI thread |
 | 4 | 🟠 High | ✅ Fixed | Every fs event → full recursive tree rescan on the UI thread |
 | 5 | 🟡 Medium | ✅ Fixed | Whole-state `clone()` per frame in `Workspace::render` |
@@ -41,27 +41,28 @@ Also fixed inside the same file: `reload_dir_preserving` now indexes previous
 nodes in a `HashMap<&Path, &TreeNode>` instead of a linear `find` per node
 (O(n) instead of O(n²) on wide directories).
 
-## 2. 🟡 Explorer rebuild — fixed the per-frame allocs, virtualization remains
+## 2. ✅ Explorer rebuild — cached rows + GPUI virtualization
 
-**`app/src/ui/sidebar/explorer.rs` / `app/src/workspace/render.rs` / `app/src/workspace/mod.rs`**
+**`app/src/fs_tree.rs` / `app/src/ui/sidebar/explorer.rs` / `app/src/workspace/render.rs` / `app/src/workspace/mod.rs`**
 
-- Row element ids changed from `format!("t{}", path.display())` (a heap
-  `SharedString` per row per frame) to a stable, allocation-free
-  `("tree-row", idx)` id.
-- The biggest driver — a full workspace repaint **on every keystroke** — is
-  gone: `InputEvent::Change` now only calls `cx.notify()` when the chrome
-  actually changed (dirty flag flips / preview promotes). Steady-state typing
-  repaints the editor view itself without rebuilding the explorer, tab bar and
-  status bar (see #3b).
-- The root folder label (`folder.to_lowercase()` + a fresh `display_name(root)`
-  string per frame) is now a cached `Workspace::root_display` field.
-
-**Still open:** rows are laid out eagerly with `overflow_y_scrollbar()` — no
-windowing/virtualization for huge trees. Doing that properly needs
-gpui/gpui-component's `List`/`VirtualList` API, which couldn't be verified
-without compiling. With #1/#4/#5 and the keystroke gate above, the per-frame
-cost is now proportional to visible rows × cheap reads instead of a full tree
-rebuild on every keypress.
+- The visible tree is flattened into a cached `Arc<[VisibleTreeRow]>` only
+  after an actual tree/expansion mutation. Ordinary workspace paints do not
+  recursively walk the tree or allocate a row vector.
+- The explorer now uses GPUI 0.2.2's `uniform_list`, the same primitive used
+  by Zed's project panel: only the viewport (plus its measurement row) is
+  laid out and painted. A project with tens of thousands of visible entries
+  no longer creates tens of thousands of GPUI elements per frame.
+- Directory children now track `children_loaded`, so an empty directory is
+  scanned once rather than on every expand/collapse cycle.
+- Root refreshes and watcher updates use a shallow, move-based merge. Loaded
+  grandchildren are retained instead of recursively rescanning every expanded
+  directory. Watcher `read_dir` work is performed on GPUI's background
+  executor; the UI thread only merges the resulting snapshot.
+- Added auto-reveal (expand only the ancestors of the opened file), explorer
+  arrow-key navigation, and compact New File/New Folder/Refresh/Collapse All
+  header actions. The project label keeps its original case.
+- Row element ids remain allocation-free (`("tree-row", idx)`) and steady-state
+  typing still avoids repainting the explorer chrome (see #3b).
 
 ## 3. 🟡 LSP sync — coalesced + off the UI thread; incremental ranges remain
 
@@ -149,8 +150,9 @@ calling `display_name(root)` per frame.
    hand-checked but not built. Areas most worth eyeballing in the build:
    `flush_pending_changes`/writer-thread code in `lsp.rs`, the borrowed
    locals in `render.rs`, and `reload_dir` in `workspace/mod.rs`.
-2. **Virtualized explorer** (issue #2) — structural follow-up using a
-   `List`-style windowed component.
+2. **Explorer runtime check** — verify scroll-wheel behavior and keyboard
+   focus with the exact desktop backend; the list now uses GPUI's verified
+   `uniform_list` primitive.
 3. **Incremental LSP sync** (issue #3) — switch `content_changes` from
    `range: None` to edit ranges once the editor exposes them.
 4. Optional runtime check: `OLOVA_PERF=1 cargo run` exists for measuring the
