@@ -9,11 +9,17 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gpui::{AppContext, Context, Entity, FocusHandle, Window};
+use gpui::{
+    AppContext, Context, Entity, FocusHandle, ScrollStrategy, SharedString,
+    UniformListScrollHandle, Window,
+};
 use gpui_component::input::{InputEvent, InputState, TabSize};
 use notify::Watcher as _;
 
-use crate::fs_tree::{collapse_all, display_name, load_dir, reload_dir_preserving, TreeNode};
+use crate::fs_tree::{
+    collapse_all, display_name, flatten_visible, load_dir, merge_loaded_dir, TreeNode,
+    VisibleTreeRow,
+};
 use crate::git::{self, GitChange, RepoStatus};
 use crate::lang;
 use crate::lsp::{LspEvent, LspManager};
@@ -90,6 +96,14 @@ pub(crate) struct Workspace {
     /// None until the user opens a folder (VS Code-style start state).
     pub(crate) root: Option<PathBuf>,
     pub(crate) tree: Vec<TreeNode>,
+    /// Flat, render-ready rows for the explorer. The tree is flattened only
+    /// after a structural change; normal paints reuse this Arc and let
+    /// `uniform_list` render just the rows in the viewport.
+    pub(crate) explorer_rows: Arc<[VisibleTreeRow]>,
+    /// Persistent scroll position for the virtualized explorer list.
+    pub(crate) explorer_scroll_handle: UniformListScrollHandle,
+    /// Focus target used by explorer keyboard navigation.
+    pub(crate) explorer_focus_handle: FocusHandle,
     /// Currently selected path in the explorer.
     pub(crate) selected_path: Option<PathBuf>,
     pub(crate) explorer_section_expanded: bool,
@@ -122,6 +136,9 @@ pub(crate) struct Workspace {
     /// Cached `display_name(root)` so the title bar and explorer header don't
     /// re-derive (and re-allocate) the folder name on every frame.
     pub(crate) root_display: String,
+    /// GPUI's shared form of the same label; cloning it for a render is cheap
+    /// and avoids converting the borrowed String into a new allocation.
+    pub(crate) root_display_shared: SharedString,
     /// Background file system watcher
     pub(crate) _watcher: Option<notify::RecommendedWatcher>,
     /// Open tabs
@@ -182,6 +199,8 @@ impl Workspace {
         // a focused element to dispatch through, even on the welcome screen.
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window);
+        let explorer_focus_handle = cx.focus_handle();
+        let explorer_scroll_handle = UniformListScrollHandle::new();
 
         let lsp_mgr = LspManager::new();
         let rx = lsp_mgr.event_receiver();
@@ -259,15 +278,17 @@ impl Workspace {
                     paths.push(more);
                 }
 
-                // The only directory level whose entry set can have changed
-                // is the parent of each changed path (or the path itself
-                // when it is a directory).
+                // The parent always needs a refresh because a create/delete
+                // changes its entry set. A directory's own level is included
+                // too so a newly-created folder is visible as soon as it is
+                // expanded. Never walk the whole project tree for one event.
                 let mut dirs: HashSet<PathBuf> = HashSet::new();
                 for p in paths {
+                    if let Some(parent) = p.parent() {
+                        dirs.insert(parent.to_path_buf());
+                    }
                     if p.is_dir() {
                         dirs.insert(p);
-                    } else if let Some(parent) = p.parent() {
-                        dirs.insert(parent.to_path_buf());
                     }
                 }
                 if !dirs.is_empty() {
@@ -276,16 +297,32 @@ impl Workspace {
             }
         });
 
-        // Apply debounced, scoped reloads on the UI thread.
+        // Scan the affected directory levels off the UI thread. The UI only
+        // merges the finished snapshots, so even a watcher burst in a large
+        // folder cannot block input, scrolling, or painting.
         cx.spawn({
             let rx = fs_reload_rx.clone();
             async move |this, cx| {
                 while let Ok(dirs) = rx.recv().await {
+                    let scanned = cx
+                        .background_spawn(async move {
+                            dirs.into_iter()
+                                .map(|dir| {
+                                    let entries = load_dir(&dir);
+                                    (dir, entries)
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .await;
                     let _ = this.update(cx, |workspace, cx| {
-                        for dir in dirs {
-                            workspace.reload_dir(&dir);
+                        let mut changed = false;
+                        for (dir, entries) in scanned {
+                            changed |= workspace.apply_loaded_dir_inner(&dir, entries);
                         }
-                        cx.notify();
+                        if changed {
+                            workspace.rebuild_explorer_rows();
+                            cx.notify();
+                        }
                     });
                 }
             }
@@ -305,7 +342,11 @@ impl Workspace {
         Self {
             root: None,
             tree: Vec::new(),
+            explorer_rows: Arc::from(Vec::<VisibleTreeRow>::new()),
+            explorer_scroll_handle,
+            explorer_focus_handle,
             root_display: String::new(),
+            root_display_shared: SharedString::new_static(""),
             selected_path: None,
             explorer_section_expanded: true,
             inline_creating: None,
@@ -355,9 +396,10 @@ impl Workspace {
     pub(crate) fn title(&self) -> String {
         if let Some(tab) = self.tabs.get(self.active_tab) {
             if tab.is_settings {
-                match &self.root {
-                    Some(root) => format!("Settings — {}", display_name(root)),
-                    None => "Settings — gpui editor".to_string(),
+                if self.root.is_some() {
+                    format!("Settings — {}", self.root_display)
+                } else {
+                    "Settings — gpui editor".to_string()
                 }
             } else if let Some(path) = &tab.path {
                 let star = if tab.dirty { " ●" } else { "" };
@@ -438,18 +480,53 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Rebuild the flat row cache after a tree or expansion change. This is
+    /// intentionally separate from rendering: the recursive walk is paid only
+    /// on actual explorer mutations, never while the editor is typing.
+    fn rebuild_explorer_rows(&mut self) {
+        let mut rows = Vec::new();
+        if self.explorer_section_expanded {
+            flatten_visible(&self.tree, 0, &mut rows);
+        }
+        self.explorer_rows = Arc::from(rows);
+    }
+
     pub(crate) fn load_root(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.root = Some(path.clone());
         self.root_display = display_name(&path);
+        self.root_display_shared = SharedString::from(self.root_display.clone());
         // Re-root the language servers. A server's project graph (tsconfig,
         // package.json, node_modules) is bound to the directory it was
         // started in, so opening a different folder has to restart them.
         self.lsp.lock().unwrap().set_root(Some(path.clone()));
-        self.tree = load_dir(&path);
+        // Do not make opening a folder wait on a huge root directory. The
+        // first level is scanned on the background executor and installed only
+        // if this is still the active root when it completes.
+        self.tree.clear();
         self.explorer_section_expanded = true;
+        self.rebuild_explorer_rows();
         self.selected_path = None;
         self.inline_creating = None;
-        self.status = format!("Opened folder {}", display_name(&path));
+        self.status = format!("Loading folder {}…", self.root_display);
+        let scan_root = path.clone();
+        cx.spawn(async move |this, cx| {
+            let entries = cx
+                .background_spawn({
+                    let scan_root = scan_root.clone();
+                    async move { load_dir(&scan_root) }
+                })
+                .await;
+            let _ = this.update(cx, |workspace, cx| {
+                if workspace.root.as_ref() == Some(&scan_root) {
+                    let previous = std::mem::take(&mut workspace.tree);
+                    workspace.tree = merge_loaded_dir(&scan_root, previous, entries);
+                    workspace.rebuild_explorer_rows();
+                    workspace.status = format!("Opened folder {}", workspace.root_display);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
 
         // Start filesystem watcher on the root directory. Each relevant
         // changed path is forwarded (not just a "something changed" flag) so
@@ -785,6 +862,46 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Expands only the ancestors needed to make a path visible and queues a
+    /// centered scroll. This is the same "auto reveal" behavior users expect
+    /// from VS Code/Zed, without expanding unrelated branches.
+    fn reveal_tree_path(&mut self, path: &Path) {
+        let Some(root) = self.root.clone() else {
+            return;
+        };
+        if !path.starts_with(&root) {
+            return;
+        }
+        fn expand_to(nodes: &mut [TreeNode], target: &Path) {
+            for node in nodes {
+                if target.starts_with(&node.path) {
+                    if node.is_dir {
+                        node.expanded = true;
+                        if !node.children_loaded {
+                            node.children = load_dir(&node.path);
+                            node.children_loaded = true;
+                        }
+                        if target != node.path {
+                            expand_to(&mut node.children, target);
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+        expand_to(&mut self.tree, path);
+        self.explorer_section_expanded = true;
+        self.rebuild_explorer_rows();
+        if let Some(index) = self
+            .explorer_rows
+            .iter()
+            .position(|row| row.path == path)
+        {
+            self.explorer_scroll_handle
+                .scroll_to_item(index, ScrollStrategy::Center);
+        }
+    }
+
     pub(crate) fn open_file(
         &mut self,
         path: PathBuf,
@@ -792,6 +909,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.selected_path = Some(path.clone());
+        self.reveal_tree_path(&path);
 
         // Check if file is already open in a tab
         if let Some(idx) = self.tabs.iter().position(|t| t.path.as_ref() == Some(&path)) {
@@ -1030,8 +1148,8 @@ impl Workspace {
                     self.attach_language_server(&path, lang_id, &editor, cx);
                 }
                 self.selected_path = Some(path.clone());
-                if let Some(root) = &self.root {
-                    self.tree = reload_dir_preserving(root, &self.tree);
+                if let Some(parent) = path.parent().map(|path| path.to_path_buf()) {
+                    self.reload_dir(&parent, cx);
                 }
                 self.git_poke();
                 self.status = format!("Saved {}", display_name(&path));
@@ -1048,75 +1166,262 @@ impl Workspace {
 
     pub(crate) fn toggle_dir(&mut self, path: &Path, cx: &mut Context<Self>) {
         self.selected_path = Some(path.to_path_buf());
-        fn rec(nodes: &mut [TreeNode], path: &Path) -> bool {
+        fn rec(nodes: &mut [TreeNode], path: &Path) -> (bool, Option<PathBuf>) {
             for n in nodes {
                 if n.path == path {
                     n.expanded = !n.expanded;
-                    if n.expanded && n.children.is_empty() {
-                        n.children = load_dir(&n.path);
-                    }
-                    return true;
+                    // Do not use `children.is_empty()` as the loaded marker:
+                    // an empty folder is a valid (and cached) result.
+                    let needs_load = n.expanded && !n.children_loaded;
+                    return (true, needs_load.then(|| n.path.clone()));
                 }
-                if rec(&mut n.children, path) {
-                    return true;
+                if n.is_dir && path.starts_with(&n.path) {
+                    let (found, needs_load) = rec(&mut n.children, path);
+                    if found {
+                        return (true, needs_load);
+                    }
                 }
             }
-            false
+            (false, None)
         }
-        rec(&mut self.tree, path);
+        let (_, dir_to_load) = rec(&mut self.tree, path);
+        self.rebuild_explorer_rows();
         cx.notify();
+        if let Some(dir) = dir_to_load {
+            self.load_directory_async(dir, cx);
+        }
     }
 
     pub(crate) fn refresh_explorer(&mut self, cx: &mut Context<Self>) {
-        if let Some(root) = &self.root {
-            self.tree = reload_dir_preserving(root, &self.tree);
-            self.status = "Explorer refreshed".into();
-            cx.notify();
-        }
-    }
-
-    /// Reload a single directory level of the explorer tree after a
-    /// filesystem change, preserving expanded state of deeper levels.
-    /// No-op when the directory isn't currently visible in the tree —
-    /// previously *every* fs event triggered a full recursive rescan.
-    pub(crate) fn reload_dir(&mut self, dir: &Path) {
-        let Some(root) = self.root.as_ref() else {
+        let Some(root) = self.root.clone() else {
             return;
         };
-        if dir == root.as_path() {
-            self.tree = reload_dir_preserving(root, &self.tree);
-            return;
+        self.status = "Refreshing explorer…".into();
+        let mut scan_dirs = vec![root.clone()];
+        fn collect_loaded_dirs(nodes: &[TreeNode], out: &mut Vec<PathBuf>) {
+            for node in nodes {
+                if node.is_dir && node.children_loaded {
+                    out.push(node.path.clone());
+                    collect_loaded_dirs(&node.children, out);
+                }
+            }
         }
-        fn apply(nodes: &mut [TreeNode], dir: &Path) -> bool {
-            for n in nodes {
-                if n.path == dir {
-                    if n.is_dir {
-                        if n.expanded {
-                            n.children = reload_dir_preserving(&n.path, &n.children);
-                        } else {
-                            n.children = load_dir(&n.path);
-                        }
+        collect_loaded_dirs(&self.tree, &mut scan_dirs);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let scanned = cx
+                .background_spawn(async move {
+                    scan_dirs
+                        .into_iter()
+                        .map(|dir| {
+                            let entries = load_dir(&dir);
+                            (dir, entries)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            let _ = this.update(cx, |workspace, cx| {
+                if workspace.root.as_ref() == Some(&root) {
+                    let mut changed = false;
+                    for (dir, entries) in scanned {
+                        changed |= workspace.apply_loaded_dir_inner(&dir, entries);
+                    }
+                    if changed {
+                        workspace.rebuild_explorer_rows();
+                    }
+                    workspace.status = "Explorer refreshed".into();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Merge a directory snapshot produced by the background scanner.
+    fn apply_loaded_dir_inner(&mut self, dir: &Path, entries: Vec<TreeNode>) -> bool {
+        let Some(root) = self.root.clone() else {
+            return false;
+        };
+        if dir == root.as_path() {
+            let previous = std::mem::take(&mut self.tree);
+            self.tree = merge_loaded_dir(dir, previous, entries);
+            return true;
+        }
+
+        fn apply(
+            nodes: &mut [TreeNode],
+            dir: &Path,
+            entries: &mut Option<Vec<TreeNode>>,
+        ) -> bool {
+            for node in nodes {
+                if node.path == dir {
+                    if node.is_dir && node.expanded {
+                        let previous = std::mem::take(&mut node.children);
+                        node.children = merge_loaded_dir(
+                            dir,
+                            previous,
+                            entries.take().unwrap_or_default(),
+                        );
+                        node.children_loaded = true;
+                    } else if node.is_dir && node.children_loaded {
+                        node.children.clear();
+                        node.children_loaded = false;
                     }
                     return true;
                 }
-                if apply(&mut n.children, dir) {
+                if node.is_dir
+                    && dir.starts_with(&node.path)
+                    && apply(&mut node.children, dir, entries)
+                {
                     return true;
                 }
             }
             false
         }
-        apply(&mut self.tree, dir);
+
+        let mut entries = Some(entries);
+        apply(&mut self.tree, dir, &mut entries)
+    }
+
+    /// Scan a directory off the UI thread and merge it if it still belongs to
+    /// the active workspace. This is shared by lazy expansion and explicit
+    /// refreshes/mutations so a large directory never blocks a click.
+    fn load_directory_async(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        let Some(root) = self.root.clone() else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let entries = cx
+                .background_spawn({
+                    let dir = dir.clone();
+                    async move { load_dir(&dir) }
+                })
+                .await;
+            let _ = this.update(cx, |workspace, cx| {
+                if workspace.root.as_ref() == Some(&root)
+                    && workspace.apply_loaded_dir_inner(&dir, entries)
+                {
+                    workspace.rebuild_explorer_rows();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Reload one affected directory level after a filesystem change without
+    /// blocking the UI thread. A collapsed directory is intentionally not
+    /// scanned into the tree; it is marked stale and will be loaded fresh when
+    /// the user expands it. An expanded directory gets a shallow merge, so
+    /// loaded grandchildren move across unchanged entries without being
+    /// rescanned.
+    pub(crate) fn reload_dir(&mut self, dir: &Path, cx: &mut Context<Self>) {
+        self.load_directory_async(dir.to_path_buf(), cx);
     }
 
     pub(crate) fn collapse_all_folders(&mut self, cx: &mut Context<Self>) {
         collapse_all(&mut self.tree);
+        self.rebuild_explorer_rows();
         self.status = "Collapsed all folders".into();
         cx.notify();
     }
 
     pub(crate) fn toggle_explorer_section(&mut self, cx: &mut Context<Self>) {
         self.explorer_section_expanded = !self.explorer_section_expanded;
+        self.rebuild_explorer_rows();
         cx.notify();
+    }
+
+    /// Implements the small, high-value part of Zed/VS Code explorer
+    /// navigation without forcing the editor to take focus: arrows move the
+    /// cached visible-row selection, right/left expand and collapse, and
+    /// Enter opens/toggles. Selection is always scrolled into view by the
+    /// same uniform-list handle used by mouse navigation.
+    pub(crate) fn handle_explorer_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = event.keystroke.key.as_str();
+        let rows = Arc::clone(&self.explorer_rows);
+        if rows.is_empty() {
+            return;
+        }
+        let current = self
+            .selected_path
+            .as_ref()
+            .and_then(|selected| rows.iter().position(|row| &row.path == selected));
+        let current_ix = current.unwrap_or(0);
+
+        match key {
+            "arrowdown" | "down" => {
+                let next = (current_ix + 1).min(rows.len() - 1);
+                self.select_explorer_index(next, cx);
+            }
+            "arrowup" | "up" => {
+                self.select_explorer_index(current_ix.saturating_sub(1), cx);
+            }
+            "home" => self.select_explorer_index(0, cx),
+            "end" => self.select_explorer_index(rows.len() - 1, cx),
+            "arrowright" | "right" => {
+                let row = &rows[current_ix];
+                if row.is_dir && !row.expanded {
+                    let path = row.path.clone();
+                    self.toggle_dir(&path, cx);
+                } else if row.is_dir {
+                    if let Some(next) = rows.get(current_ix + 1)
+                        && next.depth > row.depth
+                    {
+                        self.select_explorer_index(current_ix + 1, cx);
+                    }
+                }
+            }
+            "arrowleft" | "left" => {
+                let row = &rows[current_ix];
+                if row.is_dir && row.expanded {
+                    let path = row.path.clone();
+                    self.toggle_dir(&path, cx);
+                } else if row.depth > 0 {
+                    if let Some(parent_ix) = (0..current_ix)
+                        .rev()
+                        .find(|&ix| rows[ix].depth < row.depth)
+                    {
+                        self.select_explorer_index(parent_ix, cx);
+                    }
+                }
+            }
+            "enter" => {
+                let path = rows[current_ix].path.clone();
+                if rows[current_ix].is_dir {
+                    self.toggle_dir(&path, cx);
+                } else {
+                    self.open_file(path, window, cx);
+                }
+            }
+            _ => return,
+        }
+        cx.stop_propagation();
+    }
+
+    fn select_explorer_index(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(row) = self.explorer_rows.get(index) else {
+            return;
+        };
+        self.selected_path = Some(row.path.clone());
+        self.explorer_scroll_handle
+            .scroll_to_item(index, ScrollStrategy::Center);
+        cx.notify();
+    }
+
+    pub(crate) fn start_inline_create_at_root(
+        &mut self,
+        kind: CreatingKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let root = self.root.clone();
+        self.start_inline_create(kind, root, window, cx);
     }
 
     pub(crate) fn start_inline_create(
@@ -1151,8 +1456,9 @@ impl Workspace {
                 for n in nodes {
                     if target.starts_with(&n.path) {
                         n.expanded = true;
-                        if n.children.is_empty() {
+                        if !n.children_loaded {
                             n.children = load_dir(&n.path);
+                            n.children_loaded = true;
                         }
                         expand_path(&mut n.children, target);
                     }
@@ -1161,6 +1467,7 @@ impl Workspace {
             expand_path(&mut self.tree, &dir);
         }
         self.explorer_section_expanded = true;
+        self.rebuild_explorer_rows();
 
         let input = cx.new(|cx| {
             let state = InputState::new(window, cx);
@@ -1208,9 +1515,8 @@ impl Workspace {
                     let _ = std::fs::create_dir_all(parent);
                 }
                 if let Ok(()) = std::fs::write(&target_path, b"") {
-                    if let Some(root) = &self.root {
-                        self.tree = reload_dir_preserving(root, &self.tree);
-                    }
+                    let parent_dir = creating.parent_dir.clone();
+                    self.reload_dir(&parent_dir, cx);
                     self.selected_path = Some(target_path.clone());
                     self.pending_open = Some(target_path.clone());
                     self.status = format!("Created {}", display_name(&target_path));
@@ -1218,9 +1524,8 @@ impl Workspace {
             }
             CreatingKind::Folder => {
                 if let Ok(()) = std::fs::create_dir_all(&target_path) {
-                    if let Some(root) = &self.root {
-                        self.tree = reload_dir_preserving(root, &self.tree);
-                    }
+                    let parent_dir = creating.parent_dir.clone();
+                    self.reload_dir(&parent_dir, cx);
                     self.selected_path = Some(target_path.clone());
                     self.status = format!("Created folder {}", display_name(&target_path));
                 }
@@ -1294,8 +1599,8 @@ impl Workspace {
             if self.selected_path.as_ref() == Some(&path.to_path_buf()) {
                 self.selected_path = None;
             }
-            if let Some(root) = &self.root {
-                self.tree = reload_dir_preserving(root, &self.tree);
+            if let Some(parent) = path.parent().map(|path| path.to_path_buf()) {
+                self.reload_dir(&parent, cx);
             }
             self.git_poke();
             self.status = format!("Deleted {}", display_name(path));
@@ -1323,8 +1628,13 @@ impl Workspace {
                     if self.selected_path.as_ref() == Some(&path.to_path_buf()) {
                         self.selected_path = Some(new_path.clone());
                     }
-                    if let Some(root) = &self.root {
-                        self.tree = reload_dir_preserving(root, &self.tree);
+                    if let Some(parent) = path.parent().map(|path| path.to_path_buf()) {
+                        self.reload_dir(&parent, cx);
+                    }
+                    if let Some(parent) = new_path.parent().map(|path| path.to_path_buf())
+                        && Some(parent.as_path()) != path.parent()
+                    {
+                        self.reload_dir(&parent, cx);
                     }
                     self.git_poke();
                     self.status = format!("Renamed to {}", display_name(&new_path));

@@ -57,12 +57,15 @@ impl Render for Workspace {
         // Borrowed views of state — the render helpers below only read these,
         // so the per-frame deep clones (tabs, terminal_tabs, paths, strings,
         // ...) are unnecessary and have been removed.
-        let tree = &self.tree;
+        let explorer_rows = &self.explorer_rows;
+        let explorer_scroll_handle = self.explorer_scroll_handle.clone();
+        let explorer_focus_handle = self.explorer_focus_handle.clone();
         // Get the currently open file from active tab
         let open = self.active_path();
         let selected_path = self.selected_path.as_ref();
         let explorer_section_expanded = self.explorer_section_expanded;
         let inline_creating = self.inline_creating.as_ref();
+        let root_display_shared = &self.root_display_shared;
         let status = self.status.as_str();
         let activity = self.activity;
         let root_opt = self.root.as_ref();
@@ -280,13 +283,15 @@ impl Render for Workspace {
                                 .child(match activity {
                                     Activity::Explorer => match root_opt {
                                         Some(root) => ui::sidebar::explorer::render_tree(
-                                            tree,
+                                            explorer_rows.clone(),
+                                            explorer_scroll_handle.clone(),
+                                            explorer_focus_handle.clone(),
                                             Some(root.as_path()),
                                             open,
                                             selected_path,
                                             explorer_section_expanded,
                                             inline_creating,
-                                            self.root_display.as_str(),
+                                            root_display_shared,
                                             &t,
                                             cx,
                                         ),
