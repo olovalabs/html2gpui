@@ -6,3 +6,17 @@ resolver = "2"
 # Zed ships release; this keeps `cargo run` usable on large files.
 [profile.dev.package."*"]
 opt-level = 2
+
+# Vendored copy of gpui-component 0.5.1 with fixes for two highlight-range
+# crashes (see components/gpui-component/src/input/element.rs and
+# popovers/completion_menu.rs): ranges ending one byte past the text tripped
+# GPUI's `debug_assert!(text.is_char_boundary(run.end))` and closed the app
+# while editing or using the completion menu. Keep this patch until upstream
+# ships the fixes.
+[patch.crates-io]
+gpui-component = { path = "components" }
+
+# As a path dependency it would otherwise build at opt-level 0 and the whole
+# editor would feel sluggish — keep it optimized like the other deps.
+[profile.dev.package.gpui-component]
+opt-level = 2

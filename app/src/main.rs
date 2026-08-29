@@ -29,7 +29,50 @@ use actions::*;
 use assets::{load_embedded_fonts, sync_component_fonts, CombinedAssets};
 use workspace::Workspace;
 
+/// Log every panic to a file (and stderr) so an "app just closed itself"
+/// report comes with the actual panic message and backtrace instead of a
+/// vanishing window. Panics on the main thread terminate the process, so
+/// without this a UI-thread panic looks like a silent exit.
+fn install_panic_logger() {
+    let log_path = std::env::temp_dir().join("olova-editor-panic.log");
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        let name = thread.name().unwrap_or("<unnamed>");
+        let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "unknown panic payload".to_string()
+        };
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let entry = format!(
+            "\n=== {} ===\npanic in thread '{name}' at {location}\n{msg}\nbacktrace:\n{}\n",
+            chrono_like_timestamp(),
+            std::backtrace::Backtrace::force_capture()
+        );
+        eprintln!("\n[PANIC] {msg} (at {location}) — see {}", log_path.display());
+        use std::io::Write as _;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+            let _ = f.write_all(entry.as_bytes());
+        }
+    }));
+}
+
+/// Wall-clock timestamp without pulling a date crate into the binary.
+fn chrono_like_timestamp() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("unix:{secs}")
+}
+
 fn main() {
+    install_panic_logger();
     Application::new()
         .with_assets(CombinedAssets)
         .run(|cx: &mut App| {

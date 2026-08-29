@@ -249,6 +249,22 @@ impl Workspace {
                                 cx.notify();
                             });
                         }
+                        // The server process died (crash, OOM). Forget the
+                        // cached client and respawn it for every open buffer
+                        // — the same supervision Zed applies. Skip when the
+                        // exit was a deliberate drop (app quit / root
+                        // change): respawning then would fight the teardown.
+                        LspEvent::ServerExited { server } => {
+                            let _ = this.update(cx, |workspace, cx| {
+                                let was_running =
+                                    workspace.lsp.lock().unwrap().drop_client(&server);
+                                if was_running {
+                                    workspace.status = format!("{server} exited — restarting…");
+                                    workspace.start_server_for_open_buffers(&server, cx);
+                                    cx.notify();
+                                }
+                            });
+                        }
                     }
                 }
             }

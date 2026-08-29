@@ -74,6 +74,13 @@ pub enum LspEvent {
     Initialized {
         server: String,
     },
+    /// The server process exited unexpectedly (crash, OOM, kill). The
+    /// workspace drops the cached client and respawns the server for every
+    /// open buffer, so a crashed `tsserver` heals itself instead of leaving
+    /// the editor silently feature-less until the file is reopened.
+    ServerExited {
+        server: String,
+    },
 }
 
 /// Lifecycle of one language server, surfaced in the status bar.
@@ -289,6 +296,23 @@ impl LspManager {
             .insert(server.to_string(), ServerStatus::Running);
     }
 
+    /// The server process exited unexpectedly: forget the client (dropping
+    /// the last `Arc` kills the child) and show it as starting again, so the
+    /// next `ensure_server` — usually right after, from
+    /// `start_server_for_open_buffers` — respawns a fresh process.
+    ///
+    /// Returns `true` only when a live client was actually removed. Normal
+    /// teardown (app quit, root change) drops already-removed clients, and
+    /// those must not trigger a respawn.
+    pub fn drop_client(&mut self, server: &str) -> bool {
+        let removed = self.clients.remove(server).is_some();
+        if removed {
+            self.statuses
+                .insert(server.to_string(), ServerStatus::Starting);
+        }
+        removed
+    }
+
     /// The languages a server handles, for reopening documents after install.
     pub fn languages_for_server(&self, server: &str) -> &'static [&'static str] {
         super::adapter::adapter_by_name(server)
@@ -378,6 +402,12 @@ pub struct LspClient {
     /// The most recent text we told the server for each open document. Used
     /// by providers to answer requests that need positions (code actions).
     last_texts: Arc<Mutex<HashMap<PathBuf, String>>>,
+    /// What the server currently holds for each document — the base for
+    /// incremental `didChange` diffs. Deliberately separate from
+    /// `last_texts`: that mirrors the *editor's* text (updated on every
+    /// keystroke, before the debounced flush), and diffing the editor text
+    /// against itself would silently drop the edit entirely.
+    synced_texts: Arc<Mutex<HashMap<PathBuf, String>>>,
     /// Latest diagnostics per document (from publishDiagnostics), used to
     /// build the `CodeActionContext` of code-action requests.
     last_diagnostics: Arc<Mutex<HashMap<PathBuf, Vec<lsp_types::Diagnostic>>>>,
@@ -459,6 +489,8 @@ impl LspClient {
             Arc::new(Mutex::new(HashMap::new()));
         let last_texts: Arc<Mutex<HashMap<PathBuf, String>>> =
             Arc::new(Mutex::new(HashMap::new()));
+        let synced_texts: Arc<Mutex<HashMap<PathBuf, String>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         let last_diagnostics: Arc<Mutex<HashMap<PathBuf, Vec<lsp_types::Diagnostic>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let server_capabilities: Arc<Mutex<Option<lsp_types::ServerCapabilities>>> =
@@ -482,6 +514,7 @@ impl LspClient {
             pending_opens: pending_opens.clone(),
             pending_changes: pending_changes.clone(),
             last_texts: last_texts.clone(),
+            synced_texts: synced_texts.clone(),
             last_diagnostics: last_diagnostics.clone(),
             server_capabilities: server_capabilities.clone(),
             next_id: AtomicI64::new(100),
@@ -501,17 +534,31 @@ impl LspClient {
             let stdin_for_write = stdin_arc.clone();
             let pending_w = pending_changes.clone();
             let versions_w = versions.clone();
+            let synced_w = synced_texts.clone();
+            let caps_w = server_capabilities.clone();
             thread::spawn(move || {
                 loop {
                     match out_rx.recv_timeout(Duration::from_millis(120)) {
                         Ok(bytes) => write_to_stdin(&stdin_for_write, &bytes),
                         Err(RecvTimeoutError::Timeout) => {
-                            flush_pending_changes(&stdin_for_write, &pending_w, &versions_w);
+                            flush_pending_changes(
+                                &stdin_for_write,
+                                &pending_w,
+                                &versions_w,
+                                &synced_w,
+                                &caps_w,
+                            );
                         }
                         Err(RecvTimeoutError::Disconnected) => break,
                     }
                     if !*is_alive_w.lock().unwrap() {
-                        flush_pending_changes(&stdin_for_write, &pending_w, &versions_w);
+                        flush_pending_changes(
+                            &stdin_for_write,
+                            &pending_w,
+                            &versions_w,
+                            &synced_w,
+                            &caps_w,
+                        );
                         break;
                     }
                 }
@@ -527,6 +574,7 @@ impl LspClient {
         let pending_for_init = pending_opens.clone();
         let versions_for_init = versions.clone();
         let last_texts_r = last_texts.clone();
+        let synced_r = synced_texts.clone();
         let last_diag_r = last_diagnostics.clone();
         let caps_r = server_capabilities.clone();
         let pending_r = pending.clone();
@@ -621,7 +669,8 @@ impl LspClient {
                                 for (path, lang, text) in pendings {
                                     if let Some(uri) = path_to_uri(&path) {
                                         versions_for_init.lock().unwrap().insert(path.clone(), 1);
-                                        last_texts_r.lock().unwrap().insert(path, text.clone());
+                                        last_texts_r.lock().unwrap().insert(path.clone(), text.clone());
+                                        synced_r.lock().unwrap().insert(path, text.clone());
                                         let params = DidOpenTextDocumentParams {
                                             text_document: TextDocumentItem {
                                                 uri,
@@ -664,6 +713,12 @@ impl LspClient {
                 }
             }
             *is_alive_clone.lock().unwrap() = false;
+            // Tell the workspace the process went away so it can respawn the
+            // server for every open buffer. Without this, a crashed server
+            // leaves the editor silently feature-less.
+            let _ = event_tx.try_send(LspEvent::ServerExited {
+                server: lang_str.clone(),
+            });
         });
 
         Some(client)
@@ -831,6 +886,11 @@ impl LspClient {
             .lock()
             .unwrap()
             .insert(path.to_path_buf(), text.to_string());
+        // The didOpen text is exactly what the server will hold.
+        self.synced_texts
+            .lock()
+            .unwrap()
+            .insert(path.to_path_buf(), text.to_string());
 
         if !*self.is_initialized.lock().unwrap() {
             // Queue until initialize handshake completes
@@ -896,6 +956,7 @@ impl LspClient {
         };
         self.versions.lock().unwrap().remove(path);
         self.last_texts.lock().unwrap().remove(path);
+        self.synced_texts.lock().unwrap().remove(path);
         self.last_diagnostics.lock().unwrap().remove(path);
         // Drop any not-yet-flushed edit for the document so a coalesced
         // didChange can never race the didClose.
@@ -938,9 +999,14 @@ impl LspClient {
         self.send_payload(&msg);
     }
 
-    /// Immediately sync `text` as the authoritative full document, dropping
-    /// any not-yet-flushed coalesced edit. Call before a request so the
-    /// server's copy matches what the user sees.
+    /// Immediately sync `text` as the authoritative document, dropping any
+    /// not-yet-flushed coalesced edit. Call before a request so the server's
+    /// copy matches what the user sees.
+    ///
+    /// The sync is *incremental* when the server advertised it: we diff
+    /// against the text the server last received and send one ranged edit
+    /// covering just the difference. A full-document `didChange` is legal
+    /// under any sync kind, so diffing degrades safely.
     pub fn sync_document(&self, path: &Path, text: &str) {
         if !self.is_ready() {
             return;
@@ -949,10 +1015,23 @@ impl LspClient {
             return;
         };
         self.pending_changes.lock().unwrap().remove(path);
+        // Providers (code actions) read `last_texts` as the *editor's* text.
         self.last_texts
             .lock()
             .unwrap()
             .insert(path.to_path_buf(), text.to_string());
+
+        let change = next_change_for(
+            &self.synced_texts,
+            path,
+            text,
+            server_wants_incremental(&self.server_capabilities.lock().unwrap()),
+        );
+        let Some(change) = change else {
+            // Server is already up to date; re-announcing would force it to
+            // re-analyse the document for no reason.
+            return;
+        };
 
         let version = {
             let mut versions_guard = self.versions.lock().unwrap();
@@ -962,11 +1041,7 @@ impl LspClient {
         };
         let params = DidChangeTextDocumentParams {
             text_document: VersionedTextDocumentIdentifier { uri, version },
-            content_changes: vec![TextDocumentContentChangeEvent {
-                range: None,
-                range_length: None,
-                text: text.to_string(),
-            }],
+            content_changes: vec![change],
         };
         let msg = json!({
             "jsonrpc": "2.0",
@@ -1424,13 +1499,15 @@ fn write_to_stdin(stdin_arc: &Arc<Mutex<Option<ChildStdin>>>, bytes: &[u8]) {
     }
 }
 
-/// Flush every coalesced `didChange` document as a full-document sync with a
-/// monotonically increasing version. Runs on the writer thread, so any pipe
-/// backpressure blocks a background thread, never the UI.
+/// Flush every coalesced `didChange` document as an incremental (ranged)
+/// edit with a monotonically increasing version. Runs on the writer thread,
+/// so any pipe backpressure blocks a background thread, never the UI.
 fn flush_pending_changes(
     stdin_arc: &Arc<Mutex<Option<ChildStdin>>>,
     pending: &Mutex<HashMap<PathBuf, String>>,
     versions: &Mutex<HashMap<PathBuf, i32>>,
+    synced_texts: &Mutex<HashMap<PathBuf, String>>,
+    server_capabilities: &Mutex<Option<lsp_types::ServerCapabilities>>,
 ) {
     let items: Vec<(PathBuf, String)> = {
         let mut guard = pending.lock().unwrap();
@@ -1439,12 +1516,16 @@ fn flush_pending_changes(
     if items.is_empty() {
         return;
     }
+    let incremental = server_wants_incremental(&server_capabilities.lock().unwrap());
     for (path, text) in items {
         // The document was closed before the flush — drop the stale edit.
         let doc_open = versions.lock().unwrap().contains_key(&path);
         if !doc_open {
             continue;
         }
+        let Some(change) = next_change_for(synced_texts, &path, &text, incremental) else {
+            continue;
+        };
         let Some(uri) = path_to_uri(&path) else {
             continue;
         };
@@ -1456,11 +1537,7 @@ fn flush_pending_changes(
         };
         let params = DidChangeTextDocumentParams {
             text_document: VersionedTextDocumentIdentifier { uri, version },
-            content_changes: vec![TextDocumentContentChangeEvent {
-                range: None,
-                range_length: None,
-                text,
-            }],
+            content_changes: vec![change],
         };
         let msg = json!({
             "jsonrpc": "2.0",
@@ -1471,6 +1548,138 @@ fn flush_pending_changes(
             write_to_stdin(stdin_arc, &bytes);
         }
     }
+}
+
+/// Diff the server's current copy of `path` against `text`, record `text` as
+/// the new server copy, and return the change event to send — `None` when
+/// the server is already up to date. The mutex is held across the diff so a
+/// concurrent `flush_pending_changes` and `sync_document` can never compute
+/// from the same base and apply the same change twice.
+fn next_change_for(
+    synced: &Mutex<HashMap<PathBuf, String>>,
+    path: &Path,
+    text: &str,
+    incremental: bool,
+) -> Option<TextDocumentContentChangeEvent> {
+    let mut guard = synced.lock().unwrap();
+    let prev = guard.insert(path.to_path_buf(), text.to_string());
+    if prev.as_deref() == Some(text) {
+        return None;
+    }
+    Some(content_change_for(&prev, text, incremental))
+}
+
+/// Build a single `TextDocumentContentChangeEvent` that transforms `prev`
+/// (the text the server currently holds, or `None` for a fresh document)
+/// into `text`: a ranged edit covering just the difference when we know the
+/// old text and the server accepts incremental sync, a full replacement
+/// otherwise (always legal under any sync kind).
+fn content_change_for(
+    prev: &Option<String>,
+    text: &str,
+    incremental: bool,
+) -> TextDocumentContentChangeEvent {
+    match (incremental, prev) {
+        (true, Some(prev)) => {
+            let (start, end, inserted) = diff_edit(prev, text);
+            if start == end && inserted.is_empty() {
+                // Identical texts (defensive; callers skip this case).
+                return TextDocumentContentChangeEvent {
+                    range: None,
+                    range_length: None,
+                    text: text.to_string(),
+                };
+            }
+            TextDocumentContentChangeEvent {
+                range: Some(lsp_types::Range::new(
+                    offset_to_position(prev, start),
+                    offset_to_position(prev, end),
+                )),
+                range_length: None,
+                text: inserted.to_string(),
+            }
+        }
+        _ => TextDocumentContentChangeEvent {
+            range: None,
+            range_length: None,
+            text: text.to_string(),
+        },
+    }
+}
+
+/// True when the server advertised incremental (`didChange`) sync. The sync
+/// kind is a *server* capability; before the initialize response arrives we
+/// conservatively send full documents.
+fn server_wants_incremental(caps: &Option<lsp_types::ServerCapabilities>) -> bool {
+    use lsp_types::TextDocumentSyncCapability;
+    const INCREMENTAL: lsp_types::TextDocumentSyncKind =
+        lsp_types::TextDocumentSyncKind::INCREMENTAL;
+    match caps.as_ref().and_then(|c| c.text_document_sync.as_ref()) {
+        Some(TextDocumentSyncCapability::Kind(kind)) => *kind == INCREMENTAL,
+        Some(TextDocumentSyncCapability::Options(options)) => options.change == Some(INCREMENTAL),
+        None => false,
+    }
+}
+
+/// Diff `old` → `new` into one edit: `(start, end)` are byte offsets into
+/// `old` whose contents are replaced by the returned slice of `new`.
+///
+/// The common prefix/suffix search works on bytes but is pulled back to
+/// `char` boundaries, so the offsets are always valid to convert to LSP
+/// positions. If nothing changed the result replaces an empty range with an
+/// empty string.
+fn diff_edit<'a>(old: &'a str, new: &'a str) -> (usize, usize, &'a str) {
+    if old == new {
+        return (0, 0, "");
+    }
+    let ob = old.as_bytes();
+    let nb = new.as_bytes();
+
+    // Common prefix, clamped to a char boundary.
+    let mut p = 0;
+    let max = ob.len().min(nb.len());
+    while p < max && ob[p] == nb[p] {
+        p += 1;
+    }
+    while p > 0 && (!old.is_char_boundary(p) || !new.is_char_boundary(p)) {
+        p -= 1;
+    }
+
+    // Common suffix, not allowed to reach into the prefix.
+    let mut s = 0;
+    while s < ob.len() - p
+        && s < nb.len() - p
+        && ob[ob.len() - 1 - s] == nb[nb.len() - 1 - s]
+    {
+        s += 1;
+    }
+    while s > 0
+        && (!old.is_char_boundary(ob.len() - s) || !new.is_char_boundary(nb.len() - s))
+    {
+        s -= 1;
+    }
+
+    (p, ob.len() - s, &new[p..nb.len() - s])
+}
+
+/// Convert a byte offset into an LSP `Position` (line + UTF-16 code units on
+/// the line). `byte_offset` must land on a char boundary; offsets past the
+/// end clamp to the end of the text.
+fn offset_to_position(text: &str, byte_offset: usize) -> lsp_types::Position {
+    let mut line: u32 = 0;
+    let mut col: u32 = 0;
+    for (i, ch) in text.char_indices() {
+        if i >= byte_offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += ch.len_utf16() as u32;
+        }
+    }
+    lsp_types::Position::new(line, col)
 }
 
 pub fn path_to_uri(path: &Path) -> Option<Uri> {
@@ -1758,6 +1967,166 @@ mod tests {
         assert_eq!(sent[0]["id"], "req-abc");
         assert!(sent[0].get("error").is_none());
         assert!(sent[0]["result"].is_null());
+    }
+
+    /// Incremental sync: the edit must cover exactly the changed bytes and
+    /// apply cleanly on the server's copy.
+    #[test]
+    fn diff_edit_produces_minimal_ranged_edits() {
+        // Pure insertion in the middle.
+        let (s, e, ins) = diff_edit("hello world", "hello big world");
+        assert_eq!((s, e, ins), (6, 6, "big "));
+        // Pure deletion.
+        let (s, e, ins) = diff_edit("hello big world", "hello world");
+        assert_eq!((s, e, ins), (6, 10, ""));
+        // Replacement.
+        let (s, e, ins) = diff_edit("hello world", "hello there");
+        assert_eq!((s, e, ins), (6, 11, "there"));
+        // Append.
+        let (s, e, ins) = diff_edit("abc", "abcdef");
+        assert_eq!((s, e, ins), (3, 3, "def"));
+        // Truncate.
+        let (s, e, ins) = diff_edit("abcdef", "abc");
+        assert_eq!((s, e, ins), (3, 6, ""));
+        // No change.
+        assert_eq!(diff_edit("same", "same"), (0, 0, ""));
+    }
+
+    /// Multibyte characters must not end up split across the edit range:
+    /// the offsets are pulled back to char boundaries.
+    #[test]
+    fn diff_edit_stays_on_char_boundaries() {
+        // é is two bytes; the differing byte sits inside the char.
+        let (s, e, ins) = diff_edit("café", "café!"); // pure append after é
+        let mut applied = "café".to_string();
+        applied.replace_range(s..e, ins);
+        assert_eq!(applied, "café!");
+        assert!("café".is_char_boundary(s) && "café".is_char_boundary(e));
+
+        let (s, e, ins) = diff_edit("éa", "e̶a"); // different lead char
+        let mut applied = "éa".to_string();
+        applied.replace_range(s..e, ins);
+        assert_eq!(applied, "e̶a");
+    }
+
+    /// LSP positions are line + UTF-16 code units — the classic trap is an
+    /// astral-plane char (emoji) counting as 2, and CRLF splitting lines.
+    #[test]
+    fn offset_to_position_counts_utf16_units() {
+        let text = "ab\ncd😀\nef";
+        // Start of line 2 ("ef") — 😀 is 4 UTF-8 bytes but 2 UTF-16 units.
+        let off = "ab\n".len() + "cd".len() + 4; // past the emoji
+        let pos = offset_to_position(text, off);
+        assert_eq!((pos.line, pos.character), (1, 4));
+        // Start of line 3.
+        let pos = offset_to_position(text, text.len() - 2);
+        assert_eq!((pos.line, pos.character), (2, 0));
+        // End of text.
+        let pos = offset_to_position(text, text.len());
+        assert_eq!((pos.line, pos.character), (2, 2));
+    }
+
+    /// The full chain: old server text + new buffer text → one change event
+    /// whose range refers to the OLD text (as the spec requires) and which,
+    /// when applied, reproduces the new text exactly.
+    #[test]
+    fn content_change_ranges_reference_the_old_text() {
+        let prev = "let x = 1;\nlet y = 2;\n".to_string();
+        let next = "let x = 1;\nlet y = 42;\n";
+        let change = content_change_for(&Some(prev.clone()), next, true);
+        let range = change.range.expect("should be a ranged edit");
+        assert_eq!(range.start.line, 1);
+        assert_eq!(range.end.line, 1);
+
+        // Apply the ranged edit to the old text; the result must be `next`.
+        let start = position_to_offset(&prev, range.start);
+        let end = position_to_offset(&prev, range.end);
+        let mut applied = prev.clone();
+        applied.replace_range(start..end, &change.text);
+        assert_eq!(applied, next);
+
+        // No previous text (fresh doc) → full replacement, no range.
+        let change = content_change_for(&None, "fresh", true);
+        assert!(change.range.is_none());
+        assert_eq!(change.text, "fresh");
+
+        // A full-sync server always gets the whole document.
+        let change = content_change_for(&Some(prev), next, false);
+        assert!(change.range.is_none());
+        assert_eq!(change.text, next);
+    }
+
+    /// Inverse of `offset_to_position`, for verifying edits in tests.
+    fn position_to_offset(text: &str, pos: lsp_types::Position) -> usize {
+        let mut line = 0u32;
+        for (i, ch) in text.char_indices() {
+            if line == pos.line {
+                let col = text[..i]
+                    .chars()
+                    .rev()
+                    .take_while(|c| *c != '\n')
+                    .count() as u32;
+                return i + ((pos.character - col) as usize);
+            }
+            if ch == '\n' {
+                line += 1;
+            }
+        }
+        text.len()
+    }
+
+    /// The sync kind is a server capability; both spellings the spec allows
+    /// must be recognised.
+    #[test]
+    fn incremental_sync_kind_is_detected() {
+        use lsp_types::{ServerCapabilities, TextDocumentSyncCapability};
+        assert!(!server_wants_incremental(&None));
+        assert!(!server_wants_incremental(&Some(ServerCapabilities::default())));
+        assert!(server_wants_incremental(&Some(ServerCapabilities {
+            text_document_sync: Some(TextDocumentSyncCapability::Kind(
+                lsp_types::TextDocumentSyncKind::INCREMENTAL
+            )),
+            ..Default::default()
+        })));
+        assert!(server_wants_incremental(&Some(ServerCapabilities {
+            text_document_sync: Some(TextDocumentSyncCapability::Options(
+                lsp_types::TextDocumentSyncOptions {
+                    change: Some(lsp_types::TextDocumentSyncKind::INCREMENTAL),
+                    ..Default::default()
+                }
+            )),
+            ..Default::default()
+        })));
+        assert!(!server_wants_incremental(&Some(ServerCapabilities {
+            text_document_sync: Some(TextDocumentSyncCapability::Kind(
+                lsp_types::TextDocumentSyncKind::FULL
+            )),
+            ..Default::default()
+        })));
+    }
+
+    /// Regression: the debounced flush must diff against what the *server*
+    /// holds, not what the editor holds. When the diff base was the editor
+    /// text (already updated by `did_change`), every flushed edit diffed
+    /// against itself and was silently skipped — the server stayed on the
+    /// didOpen text and stopped publishing diagnostics.
+    #[test]
+    fn flush_diffs_against_the_server_copy_not_the_editor_copy() {
+        let synced: Mutex<HashMap<PathBuf, String>> = Mutex::new(HashMap::new());
+        let path = PathBuf::from("C:/proj/a.ts");
+        // did_open: the server now holds "abc".
+        next_change_for(&synced, &path, "abc", false);
+
+        // Editor changes to "abcd" (did_change updates the editor map, not
+        // `synced`). The first flush must produce a real ranged edit…
+        let change = next_change_for(&synced, &path, "abcd", true).unwrap();
+        let range = change.range.unwrap();
+        assert_eq!(range.start.character, 3);
+        assert_eq!(change.text, "d");
+
+        // …and a repeat flush of the same text must be a no-op, not a
+        // second (corrupting) application.
+        assert!(next_change_for(&synced, &path, "abcd", true).is_none());
     }
 
     /// Genuinely unknown methods still get a spec-compliant error, so a
