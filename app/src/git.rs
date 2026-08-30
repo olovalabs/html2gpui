@@ -235,6 +235,7 @@ pub fn new_file_diff(rel: &str, content: &str) -> String {
 
 /// One rendered line of a unified diff.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 pub struct DiffLine {
     pub kind: DiffLineKind,
     /// Line number in the old file (context/removed lines).
@@ -246,6 +247,7 @@ pub struct DiffLine {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum DiffLineKind {
     /// `diff --git` / `index` / `---` / `+++` / `new file mode` …
     Meta,
@@ -260,6 +262,7 @@ pub enum DiffLineKind {
 
 /// Parse a unified diff (as produced by `git diff --unified=3 --no-color`)
 /// into numbered lines for rendering.
+#[allow(dead_code)]
 pub fn parse_diff(raw: &str) -> Vec<DiffLine> {
     let mut out = Vec::new();
     let mut old_no: Option<u32> = None;
@@ -356,6 +359,7 @@ pub fn parse_diff(raw: &str) -> Vec<DiffLine> {
     out
 }
 
+#[allow(dead_code)]
 fn bump(old: &mut Option<u32>, new: &mut Option<u32>) {
     if let Some(n) = old.as_mut() {
         *n += 1;
@@ -366,6 +370,7 @@ fn bump(old: &mut Option<u32>, new: &mut Option<u32>) {
 }
 
 /// Parse the numbers of a `@@ -a,b +c,d @@` header: `(old_start, new_start)`.
+#[allow(dead_code)]
 fn hunk_numbers(header: &str) -> (Option<u32>, Option<u32>) {
     let mut old = None;
     let mut new = None;

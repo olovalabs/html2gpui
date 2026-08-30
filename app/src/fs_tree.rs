@@ -115,6 +115,7 @@ pub fn load_dir(dir: &Path) -> Vec<TreeNode> {
 ///
 /// `previous` is consumed so unchanged child vectors move into the new
 /// snapshot instead of being cloned.
+#[allow(dead_code)]
 pub fn reload_dir_preserving_shallow(dir: &Path, previous: Vec<TreeNode>) -> Vec<TreeNode> {
     merge_loaded_dir(dir, previous, load_dir(dir))
 }
@@ -152,6 +153,7 @@ pub fn merge_loaded_dir(
 /// Kept as a compatibility helper for callers that need the old eager,
 /// recursive behavior. Explorer refreshes and filesystem notifications use
 /// [`reload_dir_preserving_shallow`] so they do not rescan unrelated folders.
+#[allow(dead_code)]
 pub fn reload_dir_preserving(dir: &Path, prev_nodes: &[TreeNode]) -> Vec<TreeNode> {
     let mut previous_by_path: HashMap<&Path, &TreeNode> = HashMap::with_capacity(prev_nodes.len());
     for prev in prev_nodes {

@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{App, AppContext, Context, Entity, SharedString, Task, Window};
 use gpui_component::input::{
@@ -118,6 +118,8 @@ pub struct LspManager {
     root: Option<PathBuf>,
     event_tx: async_channel::Sender<LspEvent>,
     event_rx: async_channel::Receiver<LspEvent>,
+    /// server name → (consecutive crash count, last crash timestamp)
+    crash_counts: HashMap<String, (usize, Instant)>,
 }
 
 impl LspManager {
@@ -130,6 +132,7 @@ impl LspManager {
             root: None,
             event_tx,
             event_rx,
+            crash_counts: HashMap::new(),
         }
     }
 
@@ -149,6 +152,7 @@ impl LspManager {
             self.clients.clear();
             self.statuses.clear();
             self.installing.clear();
+            self.crash_counts.clear();
         }
     }
 
@@ -178,6 +182,16 @@ impl LspManager {
             // The server died (crash, OOM). Drop it and respawn below —
             // Zed's supervisor does the same.
             self.clients.remove(name);
+        }
+
+        if let Some(status) = self.statuses.get(name) {
+            if matches!(status, ServerStatus::Failed(_)) {
+                if let Some((count, last_crash)) = self.crash_counts.get(name) {
+                    if *count >= 3 && last_crash.elapsed() < Duration::from_secs(60) {
+                        return None;
+                    }
+                }
+            }
         }
 
         let root = root_dir.map(Path::to_path_buf).or_else(|| self.root.clone());
@@ -292,6 +306,7 @@ impl LspManager {
 
     /// Mark a server as fully initialized.
     pub fn set_running(&mut self, server: &str) {
+        self.crash_counts.remove(server);
         self.statuses
             .insert(server.to_string(), ServerStatus::Running);
     }
@@ -306,11 +321,35 @@ impl LspManager {
     /// those must not trigger a respawn.
     pub fn drop_client(&mut self, server: &str) -> bool {
         let removed = self.clients.remove(server).is_some();
-        if removed {
+        if !removed {
+            return false;
+        }
+
+        let now = Instant::now();
+        let (count, last_crash) = self
+            .crash_counts
+            .entry(server.to_string())
+            .or_insert((0, now));
+
+        if now.duration_since(*last_crash) < Duration::from_secs(10) {
+            *count += 1;
+        } else {
+            *count = 1;
+        }
+        *last_crash = now;
+
+        if *count >= 3 {
+            self.statuses.insert(
+                server.to_string(),
+                ServerStatus::Failed(format!("{server} exited repeatedly — stopped auto-restarting")),
+            );
+            eprintln!("[LSP] {server} exited repeatedly — stopping auto-restart.");
+            false
+        } else {
             self.statuses
                 .insert(server.to_string(), ServerStatus::Starting);
+            true
         }
-        removed
     }
 
     /// The languages a server handles, for reopening documents after install.

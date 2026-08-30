@@ -12,7 +12,7 @@ use gpui::{
     div, prelude::*, px, rgba, svg, uniform_list, AnyElement, Context, FocusHandle, FontWeight,
     IntoElement, SharedString, UniformListScrollHandle, Window,
 };
-use gpui_component::{input::Input, menu::ContextMenuExt, Sizable};
+use gpui_component::{input::Input, menu::ContextMenuExt, tooltip::Tooltip, Sizable};
 
 use crate::actions::{
     ExplorerCollapseAll, ExplorerCopyPath, ExplorerCopyRelativePath, ExplorerDelete,
@@ -146,28 +146,32 @@ pub(crate) fn render_tree(
         )
         .child(header_action_button(
             "exp-new-file",
-            "ui_icons/new_file.svg",
+            "ui_icons/new-file_tint.svg",
+            "New File...",
             t,
             |this, window, cx| this.start_inline_create_at_root(CreatingKind::File, window, cx),
             cx,
         ))
         .child(header_action_button(
             "exp-new-folder",
-            "ui_icons/new_folder.svg",
+            "ui_icons/new-folder_tint.svg",
+            "New Folder...",
             t,
             |this, window, cx| this.start_inline_create_at_root(CreatingKind::Folder, window, cx),
             cx,
         ))
         .child(header_action_button(
             "exp-refresh",
-            "ui_icons/refresh.svg",
+            "ui_icons/refresh_tint.svg",
+            "Refresh Explorer",
             t,
             |this, _window, cx| this.refresh_explorer(cx),
             cx,
         ))
         .child(header_action_button(
             "exp-collapse-all",
-            "ui_icons/collapse-all.svg",
+            "ui_icons/collapse-all_tint.svg",
+            "Collapse Folders in Explorer",
             t,
             |this, _window, cx| this.collapse_all_folders(cx),
             cx,
@@ -249,20 +253,28 @@ pub(crate) fn render_tree(
 fn header_action_button(
     id: &'static str,
     icon_path: &'static str,
+    tooltip: &'static str,
     t: &Colors,
     action: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
     div()
         .id(id)
-        .size(px(26.0))
+        .size(px(24.0))
         .flex()
         .items_center()
         .justify_center()
         .rounded(px(4.0))
         .cursor_pointer()
         .hover(|s| s.bg(rgba(t.element_hover)))
-        .child(icon_img(icon_path, 15.0))
+        .tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx))
+        .child(
+            svg()
+                .path(icon_path)
+                .w(px(14.0))
+                .h(px(14.0))
+                .text_color(rgba(t.icon_muted)),
+        )
         .on_click(cx.listener(move |this, _, window, cx| {
             action(this, window, cx);
             // Do not also toggle the root section when a toolbar button is
