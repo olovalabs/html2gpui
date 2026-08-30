@@ -3,7 +3,7 @@
 //! Shows the actual `git status` of the opened repository:
 //! - "Source Control" header with `...` action menu
 //! - Collapsible "Changes" repository root section
-//! - Commit input with `Generate ✨` and `Message (Ctrl+Enter to commit on "main"...)`
+//! - Commit input with `Message (Ctrl+Enter to commit on "main"...)`
 //! - Split blue `✓ Commit | ⌵` button
 //! - Collapsible `Staged Changes` section with blue badge count and official file icons
 //! - Collapsible `Changes` section with blue badge count and official file icons
@@ -374,7 +374,7 @@ fn badge(count: usize) -> impl IntoElement {
         .child(SharedString::from(count.to_string()))
 }
 
-/// Commit message box with "Generate ✨" button + Split Commit button.
+/// Commit message box + Split Commit button.
 fn commit_box(
     input: Option<&Entity<InputState>>,
     branch: &str,
@@ -391,43 +391,16 @@ fn commit_box(
             .flex()
             .flex_row()
             .items_center()
-            .justify_between()
             .bg(rgba(t.element_bg))
             .border_1()
             .border_color(rgba(t.border))
             .rounded(px(3.0))
             .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .child(
-                        Input::new(input)
-                            .xsmall()
-                            .text_size(px(12.5))
-                            .appearance(false)
-                            .bordered(false),
-                    ),
-            )
-            .child(
-                div()
-                    .id("git-generate-btn")
-                    .h(px(20.0))
-                    .px(px(6.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(2.0))
-                    .bg(rgba(0x0078d4ff))
-                    .hover(|s| s.bg(rgba(0x0086e6ff)))
-                    .rounded(px(2.0))
-                    .cursor_pointer()
-                    .text_size(px(11.0))
-                    .font_weight(FontWeight::BOLD)
-                    .text_color(rgba(0xffffffff))
-                    .child(SharedString::from("Generate ✨"))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.generate_commit_message(window, cx);
-                    })),
+                Input::new(input)
+                    .xsmall()
+                    .text_size(px(12.5))
+                    .appearance(false)
+                    .bordered(false),
             )
             .into_any_element(),
         None => div()
@@ -436,7 +409,6 @@ fn commit_box(
             .flex()
             .flex_row()
             .items_center()
-            .justify_between()
             .bg(rgba(t.element_bg))
             .border_1()
             .border_color(rgba(t.border))
@@ -446,20 +418,6 @@ fn commit_box(
                     .text_size(px(12.0))
                     .text_color(rgba(t.text_muted))
                     .child(SharedString::from(placeholder_text)),
-            )
-            .child(
-                div()
-                    .h(px(20.0))
-                    .px(px(6.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(rgba(0x0078d4ff))
-                    .rounded(px(2.0))
-                    .text_size(px(11.0))
-                    .font_weight(FontWeight::BOLD)
-                    .text_color(rgba(0xffffffff))
-                    .child(SharedString::from("Generate ✨")),
             )
             .into_any_element(),
     };

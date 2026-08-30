@@ -1,7 +1,7 @@
 //! Welcome screen (VS Code-style start state) and the explorer's
 //! "no folder opened" placeholder.
 
-use gpui::{div, prelude::*, px, rgba, App, Context, FontWeight, IntoElement, SharedString, Window};
+use gpui::{div, prelude::*, px, rgba, App, Context, IntoElement, SharedString, Window};
 
 use crate::theme::Colors;
 use crate::ui::app_icon;
@@ -19,21 +19,6 @@ pub(crate) fn render_welcome(t: &Colors, cx: &mut Context<Workspace>) -> impl In
         .gap(px(10.0))
         .bg(rgba(t.editor_bg))
         .child(app_icon::render_app_icon(96.0, t))
-        .child(
-            div()
-                .text_size(px(42.0))
-                .font_weight(FontWeight::BOLD)
-                .text_color(rgba(t.text))
-                .child(SharedString::from("olova editor")),
-        )
-        .child(
-            div()
-                .text_size(px(14.0))
-                .text_color(rgba(t.text_muted))
-                .child(SharedString::from(
-                    "Native code editor · tree-sitter highlighting · Zed themes",
-                )),
-        )
         .child(div().h(px(16.0)))
         .child(welcome_button(
             "Open Folder",
@@ -53,15 +38,6 @@ pub(crate) fn render_welcome(t: &Colors, cx: &mut Context<Workspace>) -> impl In
             t,
             cx.listener(|this, _, window, cx| this.new_file(window, cx)),
         ))
-        .child(div().h(px(8.0)))
-        .child(
-            div()
-                .text_size(px(12.0))
-                .text_color(rgba(t.text_muted))
-                .child(SharedString::from(
-                    "Ctrl+N new file · Ctrl+O open file · Ctrl+S save · Ctrl+F search",
-                )),
-        )
 }
 
 fn welcome_button(

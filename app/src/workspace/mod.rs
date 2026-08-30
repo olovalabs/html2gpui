@@ -423,7 +423,7 @@ impl Workspace {
                 if self.root.is_some() {
                     format!("Settings — {}", self.root_display)
                 } else {
-                    "Settings — gpui editor".to_string()
+                    "Settings — Olova Editor".to_string()
                 }
             } else if let Some(path) = &tab.path {
                 let star = if tab.dirty { " ●" } else { "" };
@@ -441,12 +441,20 @@ impl Workspace {
                 }
             } else if tab.untitled {
                 let star = if tab.dirty { " ●" } else { "" };
-                format!("untitled{star} — gpui editor")
+                if self.root.is_some() {
+                    format!("untitled{star} — {}", self.root_display)
+                } else {
+                    format!("untitled{star} — Olova Editor")
+                }
+            } else if self.root.is_some() {
+                self.root_display.clone()
             } else {
-                "gpui editor".to_string()
+                "Olova Editor".to_string()
             }
+        } else if self.root.is_some() {
+            self.root_display.clone()
         } else {
-            "gpui editor".to_string()
+            "Olova Editor".to_string()
         }
     }
 
@@ -2018,36 +2026,6 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(crate) fn generate_commit_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let msg = if let Some(repo) = &self.git {
-            let changed_files: Vec<_> = repo
-                .changes
-                .iter()
-                .map(|c| {
-                    std::path::Path::new(&c.rel)
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| c.rel.clone())
-                })
-                .collect();
-            if changed_files.is_empty() {
-                "refactor: update source control".to_string()
-            } else if changed_files.len() == 1 {
-                format!("Update {}", changed_files[0])
-            } else {
-                format!("Update {} and {}", changed_files[0], changed_files[1])
-            }
-        } else {
-            "chore: update workspace".to_string()
-        };
-
-        if let Some(input) = &self.git_commit_input {
-            let _ = input.update(cx, |state, cx| {
-                state.set_value(&msg, window, cx);
-            });
-        }
-    }
-
     /// The commit-message input of the source-control panel. Created once on
     /// first use; Enter (or the Commit button) commits the staged changes.
     pub(crate) fn ensure_git_commit_input(
@@ -2621,7 +2599,7 @@ impl Workspace {
     }
 
     pub(crate) fn about(&mut self, cx: &mut Context<Self>) {
-        self.status = format!("gpui editor — {} (Zed theme system)", self.theme().name);
+        self.status = format!("Olova Editor — {} (Zed theme system)", self.theme().name);
         cx.notify();
     }
 }

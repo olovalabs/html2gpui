@@ -1,4 +1,4 @@
-# gpui editor
+# Olova Editor
 
 Native code editor: file tree + [gpui-component](https://github.com/longbridge/gpui-component) `Input` in **code editor** mode (rope buffer, tree-sitter highlighting, search).
 
